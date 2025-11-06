@@ -13,7 +13,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         // Import setDoc and getDoc for data handling
-        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // --- GLOBAL VARIABLES (Provided by Environment) ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -28,47 +28,69 @@
         window.teacherMap = new Map(); // Map สำหรับ Dropdown ครูผู้สอน
         window.editedGrades = {}; // {dataIndex: newGrade}
 
+        // --- Data Paths and Constants ---
+        const RAW_DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/raw_grades/data`;
+        const CSV_FILENAME = '0รมส - Sheet1.csv';
+        const TEACHER_COL = 'ครูผู้สอน';
+        const GRADE_COL = 'ผลการเรียน';
+
         // --- Firebase Initialization and Auth ---
         window.initFirebase = async () => {
+            // setLogLevel('debug'); // เปิด Debug Log
+            
             try {
+                // ตรวจสอบว่ามี config หรือไม่
+                if (Object.keys(firebaseConfig).length === 0) {
+                     showStatus('⚠️ ไม่พบการตั้งค่า Firebase (firebaseConfig ว่างเปล่า) อาจเป็นสาเหตุของข้อผิดพลาด', 'error');
+                     return;
+                }
+
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                window.db = db;
+                window.auth = auth;
 
+                let user;
                 if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
+                    const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+                    user = userCredential.user;
                 } else {
-                    await signInAnonymously(auth);
+                    const userCredential = await signInAnonymously(auth);
+                    user = userCredential.user;
                 }
+                
+                // ตั้งค่า userId ทันทีที่ลงชื่อเข้าใช้สำเร็จ
+                window.userId = user?.uid || crypto.randomUUID();
+                isAuthReady = true;
 
                 onAuthStateChanged(auth, (user) => {
-                    isAuthReady = true;
-                    console.log("Firebase Auth State Changed. User ID:", user?.uid || 'Anon');
-                    window.db = db;
-                    window.auth = auth;
-                    window.userId = user?.uid || crypto.randomUUID();
-                    loadRawDataFromFirestoreOrCSV(); // เริ่มโหลดข้อมูลทันทีที่ Auth พร้อม
+                    // การตรวจสอบสถานะซ้ำเพื่อความมั่นใจ
+                    if (user) {
+                        window.userId = user.uid;
+                        loadRawDataFromFirestoreOrCSV(); // เริ่มโหลดข้อมูลทันทีที่ Auth พร้อม
+                    } else {
+                        // ไม่ควรเกิดขึ้นถ้า signInAnonymously สำเร็จ
+                        showStatus('⚠️ การรับรองตัวตนไม่สำเร็จ กรุณาลองใหม่', 'error');
+                    }
                 });
+
             } catch (e) {
+                // ดักจับข้อผิดพลาดการเชื่อมต่อหลัก
+                showStatus('⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล (Firebase): ' + e.message, 'error');
                 console.error("Firebase Initialization Error:", e);
-                showStatus('⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล', 'error');
+                
+                // หากเชื่อมต่อ Firebase ไม่ได้ ให้พยายามโหลดจาก CSV โดยตรง
+                showStatus('⚠️ เชื่อมต่อฐานข้อมูลไม่สำเร็จ กำลังพยายามโหลดข้อมูลจาก CSV โดยตรง...', 'info');
+                await fetchAndProcessCSV(false); // ไม่ต้องพยายามบันทึกเข้า Firestore
             }
         };
-
-        window.initFirebase();
-
-        // --- Data Paths and Constants ---
-        const RAW_DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/raw_grades/data`;
-        const CSV_FILENAME = '0รมस - Sheet1.csv';
-        const TEACHER_COL = 'ครูผู้สอน';
-        const GRADE_COL = 'ผลการเรียน';
 
         /**
          * ดึงข้อมูลดิบจาก Firestore หรือ CSV หากไม่มี
          */
         window.loadRawDataFromFirestoreOrCSV = async () => {
-            showStatus('กำลังตรวจสอบข้อมูลดิบที่บันทึกไว้...', 'info');
-            const statusMessage = document.getElementById('statusMessage');
+            showStatus('กำลังตรวจสอบข้อมูลดิบที่บันทึกไว้ใน Firestore...', 'info');
 
             try {
                 const docRef = doc(db, RAW_DATA_DOC_PATH(appId));
@@ -79,9 +101,9 @@
                     window.rawGrades = docSnap.data().data;
                     showStatus(`โหลดข้อมูลดิบสำเร็จ! (${window.rawGrades.length} รายการ)`, 'success');
                 } else {
-                    // โหลดจาก CSV
-                    showStatus('ไม่พบข้อมูลดิบที่บันทึกไว้... กำลังประมวลผลจากไฟล์ CSV...', 'info');
-                    await fetchAndProcessCSV();
+                    // โหลดจาก CSV และบันทึกเข้า Firestore
+                    showStatus('ไม่พบข้อมูลดิบที่บันทึกไว้... กำลังประมวลผลจากไฟล์ CSV และบันทึก...', 'info');
+                    await fetchAndProcessCSV(true); // บันทึกเข้า Firestore ด้วย
                 }
                 
                 // สร้าง Teacher Map และ Initialize UI หลังจากโหลดข้อมูล
@@ -93,28 +115,30 @@
                 }
 
             } catch (e) {
-                showStatus('⚠️ ข้อผิดพลาดในการโหลด/บันทึกข้อมูล กรุณาลองใหม่อีกครั้ง', 'error');
+                showStatus('⚠️ ข้อผิดพลาดในการโหลดข้อมูลจาก Firestore กรุณาลองใหม่อีกครั้ง', 'error');
                 console.error("Firestore operation failed:", e);
                 // ในกรณีที่เกิดข้อผิดพลาดกับ Firestore ให้ลองประมวลผลจาก CSV โดยตรง
-                await fetchAndProcessCSV();
+                await fetchAndProcessCSV(false); // ไม่ต้องพยายามบันทึกเข้า Firestore
             }
         };
 
         /**
-         * ดึงไฟล์ CSV มาประมวลผลและบันทึกเข้า Firestore เป็นข้อมูลดิบ
+         * ดึงไฟล์ CSV มาประมวลผล
+         * @param {boolean} shouldSaveToFirestore - ควรกดบันทึกข้อมูลดิบเข้า Firestore หรือไม่
          */
-        window.fetchAndProcessCSV = async () => {
-            const statusMessage = document.getElementById('statusMessage');
-
+        window.fetchAndProcessCSV = async (shouldSaveToFirestore) => {
             try {
-                const response = await fetch(CSV_FILENAME);
+                // FIX: ใช้ encodeURIComponent เพื่อแก้ปัญหาการโหลดชื่อไฟล์ที่มีอักขระไทย
+                const encodedFilename = encodeURIComponent(CSV_FILENAME);
+                const response = await fetch(encodedFilename);
+
                 if (!response.ok) throw new Error('CSV file not found or inaccessible.');
                 
                 const csvText = await response.text();
 
                 PapaParse.parse(csvText, {
                     header: true,
-                    dynamicTyping: false, // ใช้ false เพื่อให้ Grade เป็น String
+                    dynamicTyping: false, 
                     skipEmptyLines: true,
                     encoding: "TIS-620",
                     complete: async function(results) {
@@ -122,10 +146,22 @@
                         window.rawGrades = results.data.filter(row => 
                             ['มส', 'ร', '0'].includes(String(row[GRADE_COL]).trim())
                         );
+                        
+                        // บันทึกข้อมูลดิบที่กรองแล้วลง Firestore ถ้าได้รับคำสั่ง
+                        if (shouldSaveToFirestore && window.db) {
+                            await saveRawDataToFirestore(window.rawGrades);
+                            showStatus(`ประมวลผลจาก CSV และบันทึก ${window.rawGrades.length} รายการลง Firestore สำเร็จ!`, 'success');
+                        } else {
+                            showStatus(`ประมวลผลจาก CSV สำเร็จ! (${window.rawGrades.length} รายการ)`, 'success');
+                        }
 
-                        // บันทึกข้อมูลดิบที่กรองแล้วลง Firestore
-                        await saveRawDataToFirestore(window.rawGrades);
-                        showStatus(`ประมวลผลจาก CSV สำเร็จ! บันทึก ${window.rawGrades.length} รายการลง Firestore`, 'success');
+                        // สร้าง UI
+                        if (window.rawGrades.length > 0) {
+                            buildTeacherMap();
+                            initializeUI();
+                        } else {
+                            document.getElementById('noDataMessage').classList.remove('hidden');
+                        }
                     },
                     error: function(error) {
                         showStatus(`เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: ${error.message}`, 'error');
@@ -144,46 +180,55 @@
          * @param {Array<Object>} data ข้อมูลดิบที่ถูกแก้ไข
          */
         async function saveRawDataToFirestore(data) {
+            // ตรวจสอบว่า auth พร้อมหรือไม่
+            if (!window.db) {
+                 throw new Error("Firestore is not initialized or user is not authenticated.");
+            }
+            
             const rawDataObject = {
                 data: data, // ข้อมูลดิบทั้งหมดที่ใช้ในการแก้ไข
                 timestamp: Date.now(),
                 appId: appId
             };
 
-            const docRef = doc(db, RAW_DATA_DOC_PATH(appId));
+            const docRef = doc(window.db, RAW_DATA_DOC_PATH(appId));
             // ใช้ setDoc เพื่อ overwrite ข้อมูลทั้งหมดด้วยชุดข้อมูลล่าสุด
             await setDoc(docRef, rawDataObject);
         }
+        
+        // เริ่มต้นการทำงาน
+        window.initFirebase();
 
     </script>
 
     <!-- ส่วนสำหรับโค้ด JS ที่เหลือ (ไม่เกี่ยวกับ Firebase) -->
     <script>
         // Constants for UI and Data
-        const teacherSelect = document.getElementById('teacherSelect');
-        const saveButton = document.getElementById('saveButton');
-        const statusMessage = document.getElementById('statusMessage');
-        const gradeArea = document.getElementById('gradeArea');
-        const noDataMessage = document.getElementById('noDataMessage');
+        const teacherSelect = () => document.getElementById('teacherSelect');
+        const saveButton = () => document.getElementById('saveButton');
+        const statusMessage = () => document.getElementById('statusMessage');
+        const gradeArea = () => document.getElementById('gradeArea');
+        const noDataMessage = () => document.getElementById('noDataMessage');
         const GRADES = ['มส', 'ร', '0', '1', '1.5', '2', '2.5', '3', '3.5', '4'];
         
         // ฟังก์ชันแสดงสถานะ
         function showStatus(message, type = 'info') {
-            statusMessage.textContent = message;
-            statusMessage.className = `text-center p-3 rounded-lg mt-4 text-white font-medium shadow-md transition duration-300`;
+            const statusEl = statusMessage();
+            statusEl.textContent = message;
+            statusEl.className = `text-center p-3 rounded-lg mt-4 text-white font-medium shadow-md transition duration-300`;
             switch (type) {
                 case 'success':
-                    statusMessage.classList.add('bg-green-500');
+                    statusEl.classList.add('bg-green-500');
                     break;
                 case 'error':
-                    statusMessage.classList.add('bg-red-500');
+                    statusEl.classList.add('bg-red-500');
                     break;
                 case 'info':
                 default:
-                    statusMessage.classList.add('bg-blue-500');
+                    statusEl.classList.add('bg-blue-500');
                     break;
             }
-            statusMessage.classList.remove('hidden');
+            statusEl.classList.remove('hidden');
         }
 
         /**
@@ -192,7 +237,7 @@
         function buildTeacherMap() {
             const tempMap = new Map();
             window.rawGrades.forEach((row, index) => {
-                const teacherName = String(row[TEACHER_COL]).trim();
+                const teacherName = String(row['ครูผู้สอน']).trim();
                 
                 if (teacherName) {
                     if (!tempMap.has(teacherName)) {
@@ -209,39 +254,44 @@
          * สร้าง UI Dropdown และ Listener
          */
         function initializeUI() {
+            const teacherSelectEl = teacherSelect();
+            const saveButtonEl = saveButton();
+            
             // เติม Dropdown
-            teacherSelect.innerHTML = '<option value="">--- เลือกครูผู้สอน ---</option>';
+            teacherSelectEl.innerHTML = '<option value="">--- เลือกครูผู้สอน ---</option>';
             Array.from(window.teacherMap.keys()).sort().forEach(teacherName => {
                 const option = document.createElement('option');
                 option.value = teacherName;
                 option.textContent = teacherName;
-                teacherSelect.appendChild(option);
+                teacherSelectEl.appendChild(option);
             });
 
             // 3. เพิ่ม Event Listener หลังจากโหลดข้อมูลสำเร็จ
-            teacherSelect.addEventListener('change', () => {
-                statusMessage.classList.add('hidden'); // ซ่อนสถานะเมื่อเลือกใหม่
+            teacherSelectEl.removeEventListener('change', renderGrades); // ป้องกันการซ้ำ
+            teacherSelectEl.addEventListener('change', () => {
+                statusMessage().classList.add('hidden'); // ซ่อนสถานะเมื่อเลือกใหม่
                 renderGrades();
             });
 
-            saveButton.addEventListener('click', handleSave);
-            saveButton.disabled = true; // เริ่มต้นปิดปุ่มบันทึก
+            saveButtonEl.removeEventListener('click', handleSave); // ป้องกันการซ้ำ
+            saveButtonEl.addEventListener('click', handleSave);
+            saveButtonEl.disabled = true; // เริ่มต้นปิดปุ่มบันทึก
         }
         
         /**
          * แสดงตารางผลการเรียนที่ต้องแก้ไขสำหรับครูที่เลือก
          */
         function renderGrades() {
-            const selectedTeacher = teacherSelect.value;
+            const selectedTeacher = teacherSelect().value;
             const gradesForTeacher = window.teacherMap.get(selectedTeacher) || [];
             const gradeTableBody = document.getElementById('gradeTableBody');
             gradeTableBody.innerHTML = '';
             
             window.editedGrades = {}; // รีเซ็ตการแก้ไขเมื่อเปลี่ยนครู
-            saveButton.disabled = true;
+            saveButton().disabled = true;
 
             if (!selectedTeacher || gradesForTeacher.length === 0) {
-                gradeArea.classList.add('hidden');
+                gradeArea().classList.add('hidden');
                 return;
             }
 
@@ -262,21 +312,30 @@
                 const tr = gradeTableBody.insertRow();
                 tr.className = 'hover:bg-gray-50 transition duration-100';
 
-                tr.insertCell().textContent = index + 1;
-                tr.insertCell().textContent = row['เลขประจำตัว'] || '-';
-                tr.insertCell().textContent = row['ชื่อ-นามสกุล'] || '-';
-                tr.insertCell().textContent = row['ชั้น/ห้อง'] || '-';
-                tr.insertCell().textContent = `${row['ชื่อวิชา']} (${row['รหัสวิชา']})`;
+                // Helper function for mobile view data label
+                const createCell = (content, label, className = '') => {
+                    const cell = tr.insertCell();
+                    cell.textContent = content;
+                    cell.setAttribute('data-label', label);
+                    cell.className = className;
+                    return cell;
+                };
+
+                createCell(index + 1, 'ลำดับ');
+                createCell(row['เลขประจำตัว'] || '-', 'เลขประจำตัว');
+                createCell(row['ชื่อ-นามสกุล'] || '-', 'ชื่อ-นามสกุล');
+                createCell(row['ชั้น/ห้อง'] || '-', 'ชั้น/ห้อง');
+                createCell(`${row['ชื่อวิชา']} (${row['รหัสวิชา']})`, 'วิชา');
 
                 // Cell สำหรับเกรดปัจจุบัน
-                const currentGradeCell = tr.insertCell();
-                currentGradeCell.textContent = row[GRADE_COL];
-                currentGradeCell.className = 'font-bold text-orange-600';
+                const currentGradeCell = createCell(row['ผลการเรียน'], 'เกรดเดิม', 'font-bold text-orange-600');
                 
                 // Cell สำหรับการแก้ไข
                 const editCell = tr.insertCell();
+                editCell.setAttribute('data-label', 'แก้ไขเป็น');
+
                 const select = document.createElement('select');
-                select.className = 'p-1 border rounded-md w-full focus:ring-blue-500 focus:border-blue-500 transition duration-100';
+                select.className = 'p-1 border border-gray-300 rounded-md w-full focus:ring-blue-500 focus:border-blue-500 transition duration-100';
                 select.setAttribute('data-index', row.dataIndex);
 
                 // สร้างตัวเลือกเกรด
@@ -292,8 +351,9 @@
                 select.addEventListener('change', (e) => {
                     const dataIndex = e.target.getAttribute('data-index');
                     const newGrade = e.target.value;
+                    const originalGrade = row['ผลการเรียน'];
                     
-                    if (newGrade && newGrade !== row[GRADE_COL]) {
+                    if (newGrade && newGrade !== originalGrade) {
                         window.editedGrades[dataIndex] = newGrade;
                         e.target.classList.remove('border-gray-300');
                         e.target.classList.add('border-green-500', 'ring-2', 'ring-green-200');
@@ -305,27 +365,28 @@
                     }
                     
                     // เปิด/ปิดปุ่มบันทึก
-                    saveButton.disabled = Object.keys(window.editedGrades).length === 0;
+                    saveButton().disabled = Object.keys(window.editedGrades).length === 0;
                 });
 
                 editCell.appendChild(select);
             });
 
-            gradeArea.classList.remove('hidden');
+            gradeArea().classList.remove('hidden');
         }
 
         /**
          * จัดการการบันทึกข้อมูลไปยัง Firestore
          */
         async function handleSave() {
+            const saveButtonEl = saveButton();
             if (Object.keys(window.editedGrades).length === 0) {
                 showStatus('ไม่มีการแก้ไขใดๆ ที่ต้องบันทึก', 'info');
                 return;
             }
             
             showStatus('กำลังบันทึกผลการแก้ไข...', 'info');
-            saveButton.disabled = true;
-            saveButton.textContent = 'กำลังบันทึก...';
+            saveButtonEl.disabled = true;
+            saveButtonEl.textContent = 'กำลังบันทึก...';
             
             try {
                 // 1. นำการแก้ไขไปใช้กับ rawGrades
@@ -335,7 +396,7 @@
                 for (const dataIndex in window.editedGrades) {
                     const index = parseInt(dataIndex);
                     if (gradesToSave[index]) {
-                        gradesToSave[index][GRADE_COL] = window.editedGrades[dataIndex];
+                        gradesToSave[index]['ผลการเรียน'] = window.editedGrades[dataIndex];
                         editCount++;
                     }
                 }
@@ -350,15 +411,13 @@
                 
                 showStatus(`✅ บันทึกผลการแก้ไขจำนวน ${editCount} รายการสำเร็จ!`, 'success');
                 
-                // Note: การบันทึกข้อมูลดิบนี้ จะทำให้ index.html ต้องถูกประมวลผลใหม่ หากคุณต้องการให้มันอัปเดตแบบ Real-time คุณจะต้องไปแก้ไข index.html ให้เรียกใช้ 'reset data' หรือ 'reprocess csv' อัตโนมัติเมื่อข้อมูลดิบเปลี่ยน
-                
             } catch (error) {
                 console.error("Firestore Save Error:", error);
                 showStatus('⚠️ บันทึกข้อมูลไม่สำเร็จ: กรุณาลองใหม่อีกครั้ง', 'error');
 
             } finally {
-                saveButton.disabled = true;
-                saveButton.textContent = 'บันทึกผลการแก้ไข';
+                saveButtonEl.disabled = true;
+                saveButtonEl.textContent = 'บันทึกผลการแก้ไข';
             }
         }
     </script>
