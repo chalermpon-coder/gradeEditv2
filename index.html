@@ -134,7 +134,7 @@
                 </svg>
                 แดชบอร์ดสรุปภาระงาน (มส/ร/0)
             </h1>
-            <p class="text-secondary-gray mt-2">ภาพรวมผลการเรียนที่ต้องแก้ไขจากไฟล์ `<span id="csvFileName">0รมส - Sheet1.csv</span>`</p>
+            <p class="text-secondary-gray mt-2">ภาพรวมผลการเรียนที่ต้องแก้ไขจากไฟล์ `<span id="csvFileName">0db.csv</span>`</p>
             <p id="userIdDisplay" class="text-xs text-gray-400 mt-1">User ID: Loading...</p>
         </header>
 
@@ -238,7 +238,7 @@
          */
         async function loadCSVData() {
             // *** แก้ไขชื่อไฟล์ให้ตรงกับไฟล์ที่อัปโหลดแล้ว ***
-            const fileName = '0รมส - Sheet1.csv'; 
+            const fileName = '0db.csv'; 
             
             // 1. URL-encode ชื่อไฟล์
             const encodedFileName = encodeURIComponent(fileName);
@@ -520,3 +520,4 @@
 
 </body>
 </html>
+
