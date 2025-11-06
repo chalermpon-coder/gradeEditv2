@@ -11,8 +11,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        // Import deleteDoc for resetting data
-        import { getFirestore, doc, setDoc, getDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         // --- GLOBAL VARIABLES (Provided by Environment) ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -21,366 +20,338 @@
 
         let db, auth;
         let isAuthReady = false;
-
+        
+        // GLOBAL DATA
+        window.rawGrades = []; // ข้อมูลดิบจาก CSV/Firestore
+        window.summaryData = null; // สรุปผลการเรียน
+        
+        // --- Data Paths and Constants ---
+        const RAW_DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/raw_grades/data`; // PATH เดียวกันกับ Grade_editor.html
+        const CSV_FILENAME = '0รมส - Sheet1.csv';
+        const TEACHER_COL = 'ครูผู้สอน';
+        const GRADE_COL = 'ผลการเรียน';
+        
         // --- Firebase Initialization and Auth ---
         window.initFirebase = async () => {
+            // setLogLevel('debug'); // เปิด Debug Log
+            
             try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                     showStatus('⚠️ ไม่พบการตั้งค่า Firebase (firebaseConfig ว่างเปล่า)', 'error');
+                     return;
+                }
+
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                window.db = db;
+                window.auth = auth;
 
+                let user;
                 if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
+                    const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+                    user = userCredential.user;
                 } else {
-                    await signInAnonymously(auth);
+                    const userCredential = await signInAnonymously(auth);
+                    user = userCredential.user;
                 }
 
-                onAuthStateChanged(auth, (user) => {
-                    isAuthReady = true;
-                    console.log("Firebase Auth State Changed. User ID:", user?.uid || 'Anon');
-                    window.db = db; // ทำให้ db ใช้ได้ทั่วโลก
-                    window.auth = auth; // ทำให้ auth ใช้ได้ทั่วโลก
-                    window.userId = user?.uid || crypto.randomUUID();
-                    loadDataFromFirestoreOrCSV(); // เริ่มโหลดข้อมูลทันทีที่ Auth พร้อม
-                });
+                // ตั้งค่า userId ทันทีที่ลงชื่อเข้าใช้สำเร็จ
+                window.userId = user?.uid || crypto.randomUUID();
+                isAuthReady = true;
+                
+                // เริ่มฟังการเปลี่ยนแปลงข้อมูลดิบ
+                setupRawDataListener();
+
             } catch (e) {
+                showStatus('⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล (Firebase): ' + e.message, 'error');
                 console.error("Firebase Initialization Error:", e);
-                document.getElementById('statusMessage').textContent = '⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล';
+                
+                // หากเชื่อมต่อ Firebase ไม่ได้ ให้พยายามโหลดจาก CSV โดยตรง
+                showStatus('⚠️ เชื่อมต่อฐานข้อมูลไม่สำเร็จ กำลังพยายามโหลดข้อมูลจาก CSV โดยตรง...', 'info');
+                await fetchAndProcessCSV(false); // ไม่ต้องพยายามบันทึกเข้า Firestore
             }
         };
 
-        window.initFirebase();
-
-        // --- Main Data Handling Functions ---
+        /**
+         * ตั้งค่า Listener สำหรับข้อมูลดิบ (ใช้ onSnapshot)
+         */
+        function setupRawDataListener() {
+             if (!window.db || !isAuthReady) {
+                console.warn("Firestore or Auth not ready for listener.");
+                return;
+             }
+             
+             const docRef = doc(window.db, RAW_DATA_DOC_PATH(appId));
+             
+             onSnapshot(docRef, async (docSnap) => {
+                 const statusEl = document.getElementById('statusMessage');
+                 statusEl.classList.remove('hidden');
+                 
+                 if (docSnap.exists() && docSnap.data().data) {
+                    // ข้อมูลถูกแก้ไขจาก Grade_editor.html หรือเพิ่งบันทึก
+                    window.rawGrades = docSnap.data().data;
+                    showStatus(`✅ อัปเดตข้อมูลดิบจาก Firestore สำเร็จ (${window.rawGrades.length} รายการ)`, 'success');
+                 } else {
+                    // ไม่มีข้อมูลใน Firestore ให้โหลดจาก CSV และบันทึก
+                    showStatus('ไม่พบข้อมูลดิบใน Firestore... กำลังประมวลผลจากไฟล์ CSV และบันทึก...', 'info');
+                    await fetchAndProcessCSV(true);
+                 }
+                 
+                 if (window.rawGrades.length > 0) {
+                     window.summaryData = summarizeGrades(window.rawGrades);
+                     renderSummaryTable(window.summaryData);
+                     document.getElementById('resultsContainer').classList.remove('hidden');
+                 } else {
+                     document.getElementById('noDataMessage').classList.remove('hidden');
+                     document.getElementById('resultsContainer').classList.add('hidden');
+                 }
+                 
+             }, (error) => {
+                 console.error("Firestore Listener Error:", error);
+                 showStatus('⚠️ ข้อผิดพลาดในการรับการอัปเดตข้อมูลจาก Firestore', 'error');
+                 // หาก Listener ล้มเหลว ให้พยายามโหลดจาก CSV เป็นทางเลือกสุดท้าย
+                 fetchAndProcessCSV(false);
+             });
+        }
         
-        const DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/grade_summary/summary`;
-        const CSV_FILENAME = '0รมส - Sheet1.csv'; // ชื่อไฟล์ที่ต้องการดึง
-
         /**
-         * 1. ตรวจสอบข้อมูลใน Firestore
-         * 2. ถ้ามี: ดึงข้อมูลจาก Firestore
-         * 3. ถ้าไม่มี: ดึงไฟล์ CSV ที่อัปโหลดไว้, ประมวลผล, บันทึกใน Firestore และแสดงผล
+         * ดึงไฟล์ CSV มาประมวลผล
+         * @param {boolean} shouldSaveToFirestore - ควรกดบันทึกข้อมูลดิบเข้า Firestore หรือไม่
          */
-        window.loadDataFromFirestoreOrCSV = async () => {
-            const statusMessage = document.getElementById('statusMessage');
-            statusMessage.textContent = 'กำลังตรวจสอบข้อมูลที่บันทึกไว้...';
-
+        window.fetchAndProcessCSV = async (shouldSaveToFirestore) => {
             try {
-                const docRef = doc(db, DATA_DOC_PATH(appId));
-                const docSnap = await getDoc(docRef);
-
-                if (docSnap.exists() && docSnap.data().teacherSummary) {
-                    const data = docSnap.data();
-                    statusMessage.textContent = `โหลดข้อมูลสำเร็จ! อัปเดตล่าสุด: ${new Date(data.timestamp).toLocaleString('th-TH')}`;
-                    window.teacherSummaryMap = new Map(JSON.parse(data.teacherSummary)); // โหลด Map
-                    renderSummaryTable(window.teacherSummaryMap);
-                } else {
-                    statusMessage.textContent = 'ไม่พบข้อมูลที่บันทึกไว้... กำลังประมวลผลจากไฟล์ CSV อัตโนมัติ...';
-                    await fetchAndProcessCSV();
-                }
-
-                document.getElementById('resultsContainer').classList.remove('hidden');
-                document.getElementById('resetButton').classList.remove('hidden');
-
-
-            } catch (e) {
-                statusMessage.textContent = '⚠️ ข้อผิดพลาดในการโหลด/บันทึกข้อมูล กรุณาลองใหม่อีกครั้ง';
-                console.error("Firestore operation failed:", e);
-                // ในกรณีที่เกิดข้อผิดพลาดกับ Firestore ให้ลองประมวลผลจาก CSV โดยตรง
-                await fetchAndProcessCSV();
-            }
-        };
-
-        /**
-         * ดึงไฟล์ CSV ที่อัปโหลดไว้มาประมวลผล
-         */
-        window.fetchAndProcessCSV = async () => {
-            const statusMessage = document.getElementById('statusMessage');
-            statusMessage.textContent = `กำลังประมวลผลไฟล์ใหม่: ${CSV_FILENAME}...`;
-            document.getElementById('resetButton').disabled = true; // ปิดปุ่มระหว่างประมวลผล
-
-            try {
-                // Fetch CSV content
-                const response = await fetch(CSV_FILENAME);
+                // FIX: ใช้ encodeURIComponent เพื่อแก้ปัญหาการโหลดชื่อไฟล์ที่มีอักขระไทย
+                const encodedFilename = encodeURIComponent(CSV_FILENAME);
+                const response = await fetch(encodedFilename);
+                
                 if (!response.ok) throw new Error('CSV file not found or inaccessible.');
                 
                 const csvText = await response.text();
 
-                // Parse CSV using PapaParse
                 PapaParse.parse(csvText, {
                     header: true,
-                    dynamicTyping: true,
+                    dynamicTyping: false, 
                     skipEmptyLines: true,
-                    encoding: "TIS-620", // สำคัญสำหรับภาษาไทย
+                    encoding: "TIS-620",
                     complete: async function(results) {
-                        const summaryMap = processData(results.data);
-                        window.teacherSummaryMap = summaryMap; // บันทึกใน window เพื่อใช้ใน function อื่น
+                        // กรองเฉพาะเกรดที่ต้องการแก้ไข (มส, ร, 0)
+                        window.rawGrades = results.data.filter(row => 
+                            ['มส', 'ร', '0'].includes(String(row[GRADE_COL]).trim())
+                        );
                         
-                        await saveSummaryToFirestore(summaryMap);
-                        renderSummaryTable(summaryMap);
-                        statusMessage.textContent = 'ประมวลผลจากไฟล์ CSV และบันทึกข้อมูลเรียบร้อยแล้ว!';
-                        document.getElementById('resetButton').disabled = false;
+                        // บันทึกข้อมูลดิบที่กรองแล้วลง Firestore ถ้าได้รับคำสั่ง
+                        if (shouldSaveToFirestore && window.db) {
+                            await saveRawDataToFirestore(window.rawGrades);
+                            showStatus(`ประมวลผลจาก CSV และบันทึก ${window.rawGrades.length} รายการลง Firestore สำเร็จ!`, 'success');
+                        } else {
+                            showStatus(`ประมวลผลจาก CSV สำเร็จ! (${window.rawGrades.length} รายการ)`, 'success');
+                        }
                     },
                     error: function(error) {
-                        statusMessage.textContent = `เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: ${error.message}`;
+                        showStatus(`เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: ${error.message}`, 'error');
                         console.error("PapaParse Error:", error);
-                        document.getElementById('resetButton').disabled = false;
                     }
                 });
 
             } catch (e) {
-                statusMessage.textContent = `⚠️ ข้อผิดพลาดในการดึงไฟล์ ${CSV_FILENAME} กรุณาตรวจสอบว่าคุณอัปโหลดไฟล์แล้ว`;
+                showStatus(`⚠️ ข้อผิดพลาดในการดึงไฟล์ ${CSV_FILENAME} กรุณาตรวจสอบว่าคุณอัปโหลดไฟล์แล้ว`, 'error');
                 console.error("Fetch CSV Error:", e);
-                document.getElementById('resetButton').disabled = false;
             }
         };
 
         /**
-         * บันทึกข้อมูลสรุปลงใน Firestore
-         * @param {Map} summaryMap ข้อมูลสรุป
+         * บันทึกข้อมูลดิบทั้งหมดลงใน Firestore (ใช้เมื่อโหลดจาก CSV ครั้งแรก)
+         * @param {Array<Object>} data ข้อมูลดิบทั้งหมด
          */
-        async function saveSummaryToFirestore(summaryMap) {
-            const summaryObject = {
-                teacherSummary: JSON.stringify(Array.from(summaryMap.entries())), // แปลง Map เป็น String
+        async function saveRawDataToFirestore(data) {
+            // ตรวจสอบว่า auth พร้อมหรือไม่
+            if (!window.db) {
+                 throw new Error("Firestore is not initialized or user is not authenticated.");
+            }
+            
+            const rawDataObject = {
+                data: data, // ข้อมูลดิบทั้งหมด
                 timestamp: Date.now(),
                 appId: appId
             };
 
-            const docRef = doc(db, DATA_DOC_PATH(appId));
-            await setDoc(docRef, summaryObject);
+            const docRef = doc(window.db, RAW_DATA_DOC_PATH(appId));
+            // ใช้ setDoc เพื่อ overwrite ข้อมูลทั้งหมดด้วยชุดข้อมูลล่าสุด
+            await setDoc(docRef, rawDataObject);
         }
-
-        /**
-         * ลบข้อมูลเก่าใน Firestore และสั่งประมวลผลไฟล์ CSV ใหม่
-         */
-        window.deleteAndReloadData = async () => {
-            const statusMessage = document.getElementById('statusMessage');
-            
-            // ใช้คำเตือนแบบ Modal แทน alert()
-            const confirmAction = await showCustomConfirmation('คุณแน่ใจหรือไม่?', 'การดำเนินการนี้จะล้างข้อมูลที่บันทึกไว้ทั้งหมด และโหลดไฟล์ CSV ใหม่ คุณต้องการดำเนินการต่อหรือไม่?');
-
-            if (confirmAction) {
-                statusMessage.textContent = 'กำลังล้างข้อมูลเก่าในฐานข้อมูล...';
-                document.getElementById('resetButton').disabled = true;
-
-                try {
-                    const docRef = doc(db, DATA_DOC_PATH(appId));
-                    await deleteDoc(docRef);
-                    statusMessage.textContent = 'ล้างข้อมูลสำเร็จ! กำลังโหลดไฟล์ใหม่...';
-                    
-                    // เรียกฟังก์ชันประมวลผลไฟล์ CSV ใหม่
-                    await fetchAndProcessCSV();
-
-                } catch (e) {
-                    statusMessage.textContent = '⚠️ ข้อผิดพลาดในการล้างข้อมูล Firestore';
-                    console.error("Delete Firestore operation failed:", e);
-                    document.getElementById('resetButton').disabled = false;
-                }
-            }
-        };
-
-        /**
-         * Custom Modal Confirmation (แทน alert/confirm)
-         */
-        function showCustomConfirmation(title, message) {
-            return new Promise((resolve) => {
-                const modal = document.getElementById('customModal');
-                document.getElementById('modalTitle').textContent = title;
-                document.getElementById('modalMessage').textContent = message;
-
-                document.getElementById('confirmButton').onclick = () => {
-                    modal.classList.add('hidden');
-                    resolve(true);
-                };
-                
-                document.getElementById('cancelButton').onclick = () => {
-                    modal.classList.add('hidden');
-                    resolve(false);
-                };
-
-                modal.classList.remove('hidden');
-            });
-        }
+        
+        // เริ่มต้นการทำงาน
+        window.initFirebase();
 
     </script>
 
     <!-- ส่วนสำหรับโค้ด JS ที่เหลือ (ไม่เกี่ยวกับ Firebase) -->
     <script>
-        // Note: The processData and renderSummaryTable functions remain the same as the previous iteration.
-        const STATUS = ['มส', 'ร', '0']; // ผลการเรียนที่ต้องการติดตาม
+        // ฟังก์ชันแสดงสถานะ
+        function showStatus(message, type = 'info') {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.textContent = message;
+            statusEl.className = `text-center p-3 rounded-lg mt-4 text-white font-medium shadow-md transition duration-300`;
+            switch (type) {
+                case 'success':
+                    statusEl.classList.add('bg-green-500');
+                    break;
+                case 'error':
+                    statusEl.classList.add('bg-red-500');
+                    break;
+                case 'info':
+                default:
+                    statusEl.classList.add('bg-blue-500');
+                    break;
+            }
+            statusEl.classList.remove('hidden');
+        }
 
         /**
-         * ประมวลผลข้อมูลจาก CSV เพื่อจัดกลุ่มตามครูผู้สอน
-         * @param {Array<Object>} data ข้อมูล CSV ที่ถูก Parse แล้ว
-         * @returns {Map} teacherSummaryMap
+         * สรุปผลการเรียนตามครูผู้สอน
+         * @param {Array<Object>} grades ข้อมูลผลการเรียนดิบ
+         * @returns {Map<string, {subjectCount: number, studentIds: Set<string>, details: Array<Object>}>}
          */
-        function processData(data) {
-            const teacherSummaryMap = new Map();
+        function summarizeGrades(grades) {
+            const summary = new Map();
 
-            const TEACHER_COL = 'ครูผู้สอน';
-            const STUDENT_ID_COL = 'เลขประจำตัว';
-            const STUDENT_NAME_COL = 'ชื่อ-นามสกุล';
-            const CLASS_COL = 'ชั้น/ห้อง';
-            const SUBJECT_CODE_COL = 'รหัสวิชา';
-            const SUBJECT_NAME_COL = 'ชื่อวิชา';
-            const GRADE_COL = 'ผลการเรียน';
+            grades.forEach(row => {
+                const teacherName = String(row['ครูผู้สอน']).trim();
+                const subjectCode = String(row['รหัสวิชา']).trim();
+                const studentId = String(row['เลขประจำตัว']).trim();
 
-            data.forEach(row => {
-                const grade = String(row[GRADE_COL] || '').trim();
-                
-                if (STATUS.includes(grade) && row[TEACHER_COL]) {
-                    const teacherName = String(row[TEACHER_COL]).trim();
-                    const studentKey = `${row[STUDENT_ID_COL]}-${row[STUDENT_NAME_COL]}`;
+                if (!teacherName) return; // ข้ามถ้าไม่มีชื่อครู
 
-                    if (!teacherSummaryMap.has(teacherName)) {
-                        teacherSummaryMap.set(teacherName, {
-                            subjects: new Set(),
-                            students: new Map()
-                        });
-                    }
-
-                    const teacherData = teacherSummaryMap.get(teacherName);
-                    teacherData.subjects.add(`${row[SUBJECT_CODE_COL]} - ${row[SUBJECT_NAME_COL]} (${row[CLASS_COL]})`);
-                    
-                    if (!teacherData.students.has(studentKey)) {
-                        teacherData.students.set(studentKey, {
-                            studentId: row[STUDENT_ID_COL],
-                            studentName: row[STUDENT_NAME_COL],
-                            class: row[CLASS_COL],
-                            grades: []
-                        });
-                    }
-                    
-                    teacherData.students.get(studentKey).grades.push({
-                        subjectCode: row[SUBJECT_CODE_COL],
-                        subjectName: row[SUBJECT_NAME_COL],
-                        grade: grade,
+                if (!summary.has(teacherName)) {
+                    summary.set(teacherName, {
+                        subjectCount: new Set(),
+                        studentIds: new Set(),
+                        details: []
                     });
                 }
-            });
 
-            // แปลง Set และ Map ภายในให้เป็น Array สำหรับ JSON Serialization
-            const finalMap = new Map();
-            teacherSummaryMap.forEach((data, teacherName) => {
-                finalMap.set(teacherName, {
-                    subjects: Array.from(data.subjects),
-                    // การเรียงลำดับตาม class และ studentId ควรจะถูกเรียกใช้หลังจากดึงข้อมูลจาก Map
-                    students: Array.from(data.students.values()).sort((a, b) => a.class.localeCompare(b.class))
+                const teacherSummary = summary.get(teacherName);
+                teacherSummary.subjectCount.add(subjectCode);
+                teacherSummary.studentIds.add(studentId);
+                
+                // ข้อมูลรายละเอียดที่จำเป็น
+                teacherSummary.details.push({
+                    'ชื่อ-นามสกุล': row['ชื่อ-นามสกุล'],
+                    'เลขประจำตัว': row['เลขประจำตัว'],
+                    'ชั้น/ห้อง': row['ชั้น/ห้อง'],
+                    'วิชา': `${row['ชื่อวิชา']} (${row['รหัสวิชา']})`,
+                    'ผลการเรียน': row['ผลการเรียน'],
                 });
             });
 
-            return finalMap;
+            // แปลง Set ให้เป็นจำนวนนับ
+            const finalSummary = new Map();
+            summary.forEach((data, teacher) => {
+                finalSummary.set(teacher, {
+                    subjectCount: data.subjectCount.size,
+                    studentCount: data.studentIds.size,
+                    details: data.details.sort((a, b) => {
+                        const classA = a['ชั้น/ห้อง'] || '';
+                        const classB = b['ชั้น/ห้อง'] || '';
+                        const idA = a['เลขประจำตัว'] || '';
+                        const idB = b['เลขประจำตัว'] || '';
+                        
+                        const classCompare = classA.localeCompare(classB);
+                        if (classCompare !== 0) return classCompare;
+                        
+                        return String(idA).localeCompare(String(idB));
+                    })
+                });
+            });
+
+            return finalSummary;
         }
 
-
         /**
-         * แสดงผลตารางสรุปครูผู้สอน
-         * @param {Map} summaryMap ข้อมูลสรุป
+         * แสดงตารางสรุปผล
+         * @param {Map} data สรุปข้อมูล
          */
-        function renderSummaryTable(summaryMap) {
-            const tbody = document.getElementById('teacherSummaryTable').querySelector('tbody');
-            tbody.innerHTML = '';
+        function renderSummaryTable(data) {
+            const tableBody = document.getElementById('teacherSummaryTable').querySelector('tbody');
+            tableBody.innerHTML = '';
+            document.getElementById('detailView').classList.add('hidden'); // ซ่อนรายละเอียดเมื่อโหลดใหม่
             
-            const sortedTeachers = Array.from(summaryMap.entries()).sort((a, b) => {
-                return b[1].students.length - a[1].students.length;
+            // เรียงตามชื่อครู
+            const sortedTeachers = Array.from(data.keys()).sort();
+
+            sortedTeachers.forEach(teacher => {
+                const summary = data.get(teacher);
+                const tr = tableBody.insertRow();
+                tr.className = 'hover:bg-blue-50 transition duration-150 cursor-pointer';
+
+                tr.insertCell().textContent = teacher;
+                tr.insertCell().textContent = summary.subjectCount;
+                tr.insertCell().textContent = summary.studentCount;
+
+                const detailCell = tr.insertCell();
+                const detailButton = document.createElement('button');
+                detailButton.textContent = 'ดูรายละเอียด';
+                detailButton.className = 'bg-blue-500 hover:bg-blue-600 text-white text-sm py-1 px-3 rounded-full transition duration-150 shadow-md';
+                detailButton.onclick = (e) => {
+                    e.stopPropagation(); // หยุดการทำงานของ Row click
+                    renderStudentDetail(teacher, summary.details);
+                };
+                detailCell.appendChild(detailButton);
             });
-
-            sortedTeachers.forEach(([teacherName, data]) => {
-                const studentCount = data.students.length;
-                const subjectCount = data.subjects.length;
-
-                const row = tbody.insertRow();
-                row.className = 'hover:bg-blue-50 transition duration-150';
-
-                row.insertCell().textContent = teacherName;
-                row.insertCell().textContent = subjectCount;
-                row.insertCell().textContent = studentCount + ' คน';
-
-                const detailCell = row.insertCell();
-                const button = document.createElement('button');
-                button.textContent = 'ดูรายละเอียด';
-                button.className = 'bg-blue-500 hover:bg-blue-600 text-white font-bold py-1 px-3 rounded text-sm transition duration-150 shadow-md';
-                button.addEventListener('click', () => renderStudentDetail(teacherName, data));
-                detailCell.appendChild(button);
-            });
-
-            document.getElementById('studentDetailContainer').classList.add('hidden');
+            
+            document.getElementById('resultsContainer').classList.remove('hidden');
         }
 
         /**
-         * แสดงรายละเอียดนักเรียนสำหรับครูผู้สอนที่เลือก
+         * แสดงรายละเอียดนักเรียนสำหรับครูที่เลือก
+         * @param {string} teacherName ชื่อครู
+         * @param {Array<Object>} details ข้อมูลนักเรียนทั้งหมดของครู
          */
-        function renderStudentDetail(teacherName, data) {
-            const detailHeader = document.getElementById('detailHeader').querySelector('span');
-            const studentDetailContainer = document.getElementById('studentDetailContainer');
+        function renderStudentDetail(teacherName, details) {
+            document.getElementById('detailHeader').innerHTML = `รายละเอียดนักเรียนของครูผู้สอน: <span class="text-blue-700 font-bold">${teacherName}</span>`;
             const studentDetailDiv = document.getElementById('studentDetail');
-            
-            studentDetailContainer.classList.remove('hidden');
-            detailHeader.textContent = teacherName;
             studentDetailDiv.innerHTML = '';
-
-            const students = data.students.flatMap(student => 
-                student.grades.map(grade => ({
-                    studentId: student.studentId,
-                    studentName: student.studentName,
-                    class: student.class,
-                    ...grade
-                }))
-            );
-
-            // จัดเรียงตามชั้น/ห้อง และเลขประจำตัว
-            students.sort((a, b) => {
-                // Sorting by class first
-                const classCompare = a.class.localeCompare(b.class);
-                if (classCompare !== 0) return classCompare;
-                
-                // Then sort by studentId
-                return String(a.studentId).localeCompare(String(b.studentId));
-            });
             
-            const rowsHtml = students.map((student, index) => {
-                const gradeClass = student.grade === '0' ? 'text-red-600 font-bold' : 'text-orange-600 font-bold';
-                return `
-                    <tr class="hover:bg-gray-50">
-                        <td class="w-1/12">${index + 1}</td>
-                        <td class="w-2/12">${student.studentId}</td>
-                        <td class="w-3/12">${student.studentName}</td>
-                        <td class="w-1/12">${student.class}</td>
-                        <td class="w-3/12">${student.subjectName} (${student.subjectCode})</td>
-                        <td class="w-1/12 ${gradeClass}">${student.grade}</td>
+            const detailTable = document.createElement('table');
+            detailTable.className = 'min-w-full data-table';
+            
+            detailTable.innerHTML = `
+                <thead>
+                    <tr>
+                        <th>ลำดับ</th>
+                        <th>เลขประจำตัว</th>
+                        <th>ชื่อ-นามสกุล</th>
+                        <th>ชั้น/ห้อง</th>
+                        <th>วิชา</th>
+                        <th>ผลการเรียน</th>
                     </tr>
-                `;
-            }).join('');
-
-            const tableHtml = `
-                <table class="min-w-full data-table bg-white rounded-lg overflow-hidden shadow-sm">
-                    <thead>
-                        <tr>
-                            <th class="w-1/12">ลำดับ</th>
-                            <th class="w-2/12">เลขประจำตัว</th>
-                            <th class="w-3/12">ชื่อ-นามสกุล</th>
-                            <th class="w-1/12">ชั้น/ห้อง</th>
-                            <th class="w-3/12">วิชา (รหัส)</th>
-                            <th class="w-1/12">ผลการเรียน</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${rowsHtml}
-                    </tbody>
-                </table>
+                </thead>
+                <tbody>
+                ${details.map((item, index) => `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${item['เลขประจำตัว'] || '-'}</td>
+                        <td>${item['ชื่อ-นามสกุล'] || '-'}</td>
+                        <td>${item['ชั้น/ห้อง'] || '-'}</td>
+                        <td>${item['วิชา'] || '-'}</td>
+                        <td class="font-bold text-orange-600">${item['ผลการเรียน'] || '-'}</td>
+                    </tr>
+                `).join('')}
+                </tbody>
             `;
-
-            studentDetailDiv.innerHTML = tableHtml;
-
-            // เลื่อนหน้าจอไปที่ส่วนรายละเอียด
-            studentDetailContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            
+            studentDetailDiv.appendChild(detailTable);
+            document.getElementById('detailView').classList.remove('hidden');
+            
+            // เลื่อนไปที่ส่วนแสดงรายละเอียด
+            document.getElementById('detailView').scrollIntoView({ behavior: 'smooth' });
         }
     </script>
-    <!-- End of JS for Firebase/Data Processing -->
-
     <style>
+        /* สไตล์สำหรับ HTML/Tailwind CSS */
         .container-card {
-            box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 15px 30px -5px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
         .data-table th, .data-table td {
             padding: 12px 16px;
@@ -393,45 +364,68 @@
             color: #1f2937;
             text-transform: uppercase;
         }
+        .data-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .data-table th.sticky {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        @media (max-width: 768px) {
+            .data-table thead { display: none; }
+            .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+            .data-table tr { 
+                margin-bottom: 1rem; 
+                border: 1px solid #e5e7eb; 
+                border-radius: 0.5rem;
+                display: flex;
+                flex-wrap: wrap;
+                padding: 1rem 0.5rem;
+                position: relative;
+            }
+            .data-table td { 
+                text-align: right; 
+                padding: 0.5rem; 
+                border-bottom: none;
+                position: relative;
+            }
+            .data-table td:before {
+                content: attr(data-label);
+                position: absolute;
+                left: 10px;
+                width: 50%;
+                padding-right: 10px;
+                white-space: nowrap;
+                text-align: left;
+                font-weight: 600;
+                color: #4b5563;
+            }
+            .data-table td:nth-child(4), .data-table td:nth-child(5) {
+                /* For 'รายละเอียด' cell in summary table (index.html) */
+                text-align: left; 
+                width: 100%;
+                border-top: 1px dashed #ddd;
+            }
+        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen flex flex-col items-center p-4 sm:p-8">
 
-    <!-- Custom Confirmation Modal (แทน alert) -->
-    <div id="customModal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50 transition-opacity duration-300">
-        <div class="bg-white rounded-lg p-6 shadow-2xl max-w-sm w-full transform transition-all scale-100">
-            <h4 id="modalTitle" class="text-xl font-bold text-red-600 mb-4"></h4>
-            <p id="modalMessage" class="text-gray-700 mb-6"></p>
-            <div class="flex justify-end space-x-3">
-                <button id="cancelButton" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition duration-150">ยกเลิก</button>
-                <button id="confirmButton" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition duration-150">ยืนยันการประมวลผลใหม่</button>
-            </div>
-        </div>
-    </div>
-    <!-- End Custom Modal -->
-
-    <div class="w-full max-w-5xl bg-white rounded-xl container-card p-6 md:p-10">
+    <div class="w-full max-w-5xl bg-white rounded-xl container-card p-6 md:p-8">
         <h1 class="text-3xl font-bold text-blue-700 mb-2 text-center">
             ระบบสรุปผลการเรียน "มส" และ "ร"
         </h1>
         <p class="text-gray-600 mb-6 text-center">
-            ข้อมูลจะถูกโหลดและบันทึกโดยอัตโนมัติ (ดึงจากไฟล์ **0รมส - Sheet1.csv**)
+            ข้อมูลจะถูกโหลดและบันทึกโดยอัตโนมัติ (ดึงจากไฟล์ **0รมส - Sheet1.csv** และบันทึก/อัปเดตใน Firestore)
         </p>
         
-        <!-- ปุ่มประมวลผลใหม่ -->
-        <div class="text-center mb-6">
-             <button id="resetButton" onclick="deleteAndReloadData()" class="hidden bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-150 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">
-                ประมวลผลไฟล์ใหม่ (รีเซ็ตข้อมูล)
-            </button>
-        </div>
+        <!-- ข้อความสถานะ -->
+        <div id="statusMessage" class="hidden"></div>
 
-        <!-- ส่วนสำหรับแสดงข้อความสถานะ / Error -->
-        <div id="statusMessage" class="mb-6 text-center text-lg font-medium text-gray-700 min-h-[30px]">
-            กำลังเริ่มต้น...
-        </div>
-
-        <!-- ส่วนสำหรับแสดงผลลัพธ์หลัก -->
-        <div id="resultsContainer" class="hidden">
+        <!-- ส่วนแสดงผลลัพธ์ -->
+        <div id="resultsContainer" class="hidden mt-8">
             <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">
                 ตารางสรุปภาระงาน (ครูผู้สอน)
             </h2>
@@ -451,15 +445,22 @@
                 </table>
             </div>
             
-            <div id="studentDetailContainer" class="mt-8 pt-4 border-t"> <!-- แก้ไข ID ซ้ำซ้อน: ใช้ studentDetailContainer แทน detailView -->
+            <div id="detailView" class="hidden mt-8 pt-4 border-t" id="studentDetailContainer">
                 <h3 class="text-xl font-semibold text-gray-700 mb-4" id="detailHeader">
-                    รายละเอียดนักเรียนของครูผู้สอน: <span class="text-blue-600 font-bold">--</span>
+                    รายละเอียดนักเรียนของครูผู้สอน: <span class="text-blue-700 font-bold">--</span>
                 </h3>
-                <div id="studentDetail" class="bg-gray-100 p-4 rounded-lg">
+                <div id="studentDetail" class="bg-gray-100 p-4 rounded-lg overflow-x-auto">
                     <p class="text-gray-500 italic">กรุณาคลิกปุ่ม 'ดูรายละเอียด' เพื่อแสดงข้อมูลนักเรียน</p>
                 </div>
             </div>
         </div>
+
+        <!-- ข้อความเมื่อไม่มีข้อมูล -->
+        <div id="noDataMessage" class="hidden mt-8 text-center p-6 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 rounded-lg">
+            <p class="font-bold">ไม่พบข้อมูลผลการเรียน "มส", "ร", "0" ในระบบ</p>
+            <p class="text-sm mt-2">กรุณาตรวจสอบว่าไฟล์ **0รมส - Sheet1.csv** ได้รับการอัปโหลดแล้ว หรือข้อมูลในฐานข้อมูลถูกลบไป</p>
+        </div>
+
     </div>
 </body>
 </html>
