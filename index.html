@@ -29,7 +29,7 @@
                 auth = getAuth(app);
                 
                 // Set Firebase log level for debugging
-                console.log("Firebase initialized.");
+                // setLogLevel('debug'); 
 
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -60,10 +60,6 @@
                     if (userDisplayElement) {
                          userDisplayElement.textContent = `User ID: ${userId}`;
                     }
-
-                    // Once authenticated, load data
-                    // We only call initialize once from window.onload, 
-                    // this onAuthStateChanged listener confirms auth status for later operations.
                 });
                 
             } else {
@@ -134,7 +130,14 @@
                 </svg>
                 แดชบอร์ดสรุปภาระงาน (มส/ร/0)
             </h1>
-            <p class="text-secondary-gray mt-2">ภาพรวมผลการเรียนที่ต้องแก้ไขจากไฟล์ `<span id="csvFileName">0db.csv</span>`</p>
+            <!-- กำหนดชื่อไฟล์ที่ต้องใช้ในการดึงข้อมูล -->
+            <p class="text-secondary-gray mt-2">
+                ภาพรวมผลการเรียนที่ต้องแก้ไขจากไฟล์
+                <span class="font-mono text-gray-900 bg-yellow-100 px-1 py-0.5 rounded-md text-sm" id="csvFileName">
+                    0db.csv
+                </span> 
+                (ต้องอัปโหลดไฟล์ชื่อนี้เท่านั้น)
+            </p>
             <p id="userIdDisplay" class="text-xs text-gray-400 mt-1">User ID: Loading...</p>
         </header>
 
@@ -234,21 +237,50 @@
         ];
 
         /**
+         * ฟังก์ชันแสดงข้อความแจ้งเตือน/ข้อผิดพลาดในรูปแบบ Modal
+         * @param {string} title 
+         * @param {string} message 
+         * @param {string} type 'success' | 'error' | 'info'
+         */
+        function showModalMessage(title, message, type = 'info') {
+            const colorClass = {
+                'error': 'text-red-600',
+                'success': 'text-green-600',
+                'info': 'text-blue-600'
+            }[type];
+
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+            modal.innerHTML = `
+                <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
+                    <h3 class="text-lg font-bold ${colorClass} mb-2">${title}</h3>
+                    <p class="text-gray-700 text-sm mt-1">${message}</p>
+                    <button class="mt-4 bg-primary-blue hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded transition duration-150" onclick="this.parentElement.parentElement.remove()">ตกลง</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+
+        /**
          * 1. โหลดข้อมูล CSV จากไฟล์ที่อัปโหลด
          */
         async function loadCSVData() {
-            // *** แก้ไขชื่อไฟล์ให้ตรงกับไฟล์ที่อัปโหลดแล้ว ***
+            // *** ชื่อไฟล์ที่ถูกต้อง (เปลี่ยนเป็น 0db.csv ตามคำขอ) ***
             const fileName = '0db.csv'; 
             
             // 1. URL-encode ชื่อไฟล์
             const encodedFileName = encodeURIComponent(fileName);
             const fetchUri = 'uploaded:' + encodedFileName;
 
+            console.log("Attempting to fetch URI:", fetchUri);
+
             try {
                 const response = await fetch(fetchUri);
 
                 if (!response.ok) {
-                    throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+                    // หาก fetch สำเร็จแต่สถานะไม่ OK (เช่น 404, 500)
+                    throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
                 }
                 
                 const uploadedCSVContent = await response.text();
@@ -264,6 +296,8 @@
                                 // PapaParse อาจจะใช้ key ภาษาอังกฤษในแถวแรก ให้พยายามหาค่าในคอลัมน์ภาษาไทย
                                 const originalKeys = Object.keys(row);
                                 HEADERS.forEach((thaiKey, index) => {
+                                    // พยายามหาค่าจาก key ภาษาไทย หรือ key ตำแหน่งเดิม (ถ้า PapaParse ใช้ key ที่ไม่เป็นภาษาไทย)
+                                    // การแก้ไขนี้อาจต้องปรับปรุงหากรูปแบบ CSV ไม่สอดคล้องกับหัวตารางภาษาไทยเป๊ะๆ
                                     const value = row[originalKeys[index]] !== undefined ? row[originalKeys[index]] : row[thaiKey];
                                     newRow[thaiKey] = (value || '').trim();
                                 });
@@ -275,34 +309,29 @@
                         },
                         error: function(error) {
                             console.error("Error parsing CSV:", error);
-                            // ใช้ custom modal แทน alert
-                            const modal = document.createElement('div');
-                            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
-                            modal.innerHTML = `
-                                <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
-                                    <h3 class="text-lg font-bold text-red-600 mb-2">ข้อผิดพลาดในการประมวลผล</h3>
-                                    <p class="text-gray-700">ไม่สามารถประมวลผลไฟล์ CSV ได้</p>
-                                    <button class="mt-4 bg-primary-blue hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded" onclick="this.parentElement.parentElement.remove()">ตกลง</button>
-                                </div>
-                            `;
-                            document.body.appendChild(modal);
+                            showModalMessage("ข้อผิดพลาดในการประมวลผล", "ไม่สามารถประมวลผลไฟล์ CSV ได้ โปรดตรวจสอบรูปแบบไฟล์ว่าเป็น CSV ที่ถูกต้องหรือไม่", 'error');
+                            resolve(); // ยังคง resolve เพื่อให้ initialize ทำงานต่อ
                         }
                     });
                 });
             } catch (error) {
+                // หากเกิด TypeError: Failed to fetch (การเข้าถึงถูกบล็อก หรือไม่พบไฟล์)
                 console.error("Error fetching CSV file:", error);
-                // ใช้ custom modal แทน alert
-                const modal = document.createElement('div');
-                modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
-                modal.innerHTML = `
-                    <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full">
-                        <h3 class="text-lg font-bold text-red-600 mb-2">ข้อผิดพลาดในการโหลดไฟล์</h3>
-                        <p class="text-gray-700">ไม่พบไฟล์ CSV (${fileName}) หรือเกิดข้อผิดพลาดในการดึงข้อมูล</p>
-                        <p class="text-gray-700 text-sm mt-1">โปรดตรวจสอบว่าได้อัปโหลดไฟล์ที่มีชื่อว่า '${fileName}' แล้ว</p>
-                        <button class="mt-4 bg-primary-blue hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded" onclick="this.parentElement.parentElement.remove()">ตกลง</button>
-                    </div>
-                `;
-                document.body.appendChild(modal);
+                
+                let errorMessage = `ไม่สามารถโหลดไฟล์ <b>${fileName}</b> ได้`;
+                if (error.message.includes("HTTP Error")) {
+                     errorMessage += `<br>สถานะ: ${error.message}`;
+                } else if (error.message.includes("Failed to fetch")) {
+                     errorMessage += `<br><b>โปรดตรวจสอบอีกครั้งว่าได้อัปโหลดไฟล์ชื่อ '${fileName}' อย่างถูกต้องแล้ว</b>`;
+                }
+
+                showModalMessage("ข้อผิดพลาดในการโหลดไฟล์", errorMessage, 'error');
+                
+                // ตั้งค่า records เป็นว่างเพื่อป้องกันการทำงานที่ไม่จำเป็น
+                globalState.allRecords = []; 
+                elements.loadingMessage.classList.remove('hidden');
+                elements.resultsContainer.classList.add('hidden');
+                elements.loadingMessage.innerHTML = `ไม่สามารถโหลดข้อมูล CSV ได้<br>โปรดตรวจสอบว่าได้อัปโหลดไฟล์ <b>${fileName}</b> แล้ว`;
             }
         }
         
@@ -322,7 +351,10 @@
             
             // 2. สรุปข้อมูลตามครูผู้สอน
             filteredRecords.forEach(record => {
-                const teacherName = record['ครูผู้สอน'];
+                // ต้องมีการลบเลขลำดับหน้าชื่อครูออก เช่น "1.นางชลธิรา ผินโพธิ์" ให้เหลือแค่ "นางชลธิรา ผินโพธิ์"
+                const rawTeacherName = record['ครูผู้สอน'];
+                // ใช้ regex เพื่อลบเลขนำหน้า เช่น '1.' หรือ '10.' ออก
+                const teacherName = rawTeacherName ? rawTeacherName.replace(/^\d+\.\s*/, '').trim() : 'ไม่ระบุครูผู้สอน';
                 
                 if (!summary[teacherName]) {
                     summary[teacherName] = {
@@ -344,18 +376,24 @@
             globalState.teacherSummary = summary;
             
             // อัปเดตจำนวนรายการทั้งหมด
-            elements.totalRecords.textContent = `จำนวนรายการนักเรียนทั้งหมด: ${filteredRecords.length} รายการ`;
+            elements.totalRecords.textContent = `จำนวนรายการนักเรียนที่ติด มส/ร/0: ${filteredRecords.length} รายการ`;
 
             // 3. อัปเดตตัวกรองครูผู้สอน (ถ้ายังไม่เคยอัปเดต)
-            if (elements.teacherFilter.options.length <= 1) { // ตรวจสอบว่ามีแค่ "แสดงทั้งหมด"
-                const teacherNames = Object.keys(summary).sort();
-                teacherNames.forEach(name => {
-                    const option = document.createElement('option');
-                    option.value = name;
-                    option.textContent = name;
-                    elements.teacherFilter.appendChild(option);
-                });
-            }
+            // รีเซ็ตตัวกรองครูผู้สอนก่อนทุกครั้งที่ประมวลผลใหม่ เพื่อรวมครูผู้สอนที่ปรากฏในการกรองปัจจุบัน
+            const currentSelectedTeacher = elements.teacherFilter.value;
+            elements.teacherFilter.innerHTML = '<option value="">-- แสดงทั้งหมด --</option>';
+            
+            const teacherNames = Object.keys(summary).sort();
+            teacherNames.forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                if (name === currentSelectedTeacher) {
+                    option.selected = true;
+                }
+                elements.teacherFilter.appendChild(option);
+            });
+
 
             // 4. แสดงผลตาราง
             renderSummaryTable();
@@ -368,7 +406,14 @@
             elements.teacherSummaryTableBody.innerHTML = '';
             const selectedFilterTeacher = elements.teacherFilter.value;
             
-            const sortedTeacherNames = Object.keys(globalState.teacherSummary).sort();
+            // กรองครูผู้สอนที่ไม่ระบุชื่อออกก่อนแสดงผล
+            const validTeacherNames = Object.keys(globalState.teacherSummary).filter(name => name !== 'ไม่ระบุครูผู้สอน');
+            let sortedTeacherNames = validTeacherNames.sort();
+
+            // หากมีครูผู้สอนที่ไม่ระบุชื่อ ให้เพิ่มไว้ท้ายตาราง
+            if (globalState.teacherSummary['ไม่ระบุครูผู้สอน']) {
+                sortedTeacherNames.push('ไม่ระบุครูผู้สอน');
+            }
             
             sortedTeacherNames.forEach(teacherName => {
                 const summary = globalState.teacherSummary[teacherName];
@@ -403,21 +448,17 @@
             }
 
             // ซ่อน/แสดงส่วนผลลัพธ์
-            if (globalState.allRecords.length > 0) {
+            if (globalState.allRecords.length > 0 && elements.teacherSummaryTableBody.children.length > 0) {
+                elements.loadingMessage.classList.add('hidden');
+                elements.resultsContainer.classList.remove('hidden');
+            } else if (globalState.allRecords.length > 0) {
+                // ข้อมูลถูกโหลดแล้ว แต่ไม่มีรายการตามตัวกรอง
                 elements.loadingMessage.classList.add('hidden');
                 elements.resultsContainer.classList.remove('hidden');
             } else {
-                 // Check if data is empty after filtering or if initial load failed
-                 if (elements.teacherFilter.value || elements.gradeFilter.value) {
-                    // Data is empty due to filtering, keep results container visible
-                    elements.loadingMessage.classList.add('hidden');
-                    elements.resultsContainer.classList.remove('hidden');
-                 } else {
-                    // Initial load failed
-                    elements.loadingMessage.classList.remove('hidden');
-                    elements.loadingMessage.textContent = 'ไม่สามารถโหลดข้อมูล CSV ได้ โปรดตรวจสอบไฟล์';
-                    elements.resultsContainer.classList.add('hidden');
-                 }
+                // โหลดข้อมูลไม่สำเร็จ
+                elements.loadingMessage.classList.remove('hidden');
+                elements.resultsContainer.classList.add('hidden');
             }
         }
 
@@ -487,6 +528,8 @@
                 </div>
             `;
             elements.studentDetail.innerHTML = tableHTML;
+            // เลื่อนไปที่ส่วนแสดงรายละเอียด
+            document.getElementById('detailView').scrollIntoView({ behavior: 'smooth' });
         }
 
         /**
@@ -520,4 +563,3 @@
 
 </body>
 </html>
-
