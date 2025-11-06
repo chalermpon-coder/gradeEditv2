@@ -3,550 +3,473 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบแก้ไขผลการเรียน</title>
-    <!-- โหลด Tailwind CSS CDN เพื่อใช้ในการจัดรูปแบบ -->
+    <title>ระบบแก้ไขผลการเรียน (Firestore)</title>
+    <!-- โหลด Tailwind CSS และ PapaParse -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        'primary-blue': '#10b981', // emerald-500
-                    },
-                },
-            },
-            // กำหนดให้ใช้ฟอนต์ Inter สำหรับความสวยงาม
-            fontFamily: {
-                sans: ['Inter', 'Tahoma', 'sans-serif'],
-            }
-        }
-    </script>
-    <style>
-        /* สไตล์เพิ่มเติมสำหรับตารางให้ดูดีบนมือถือ */
-        .responsive-table th, .responsive-table td {
-            padding: 12px 16px;
-            text-align: left;
-        }
-        @media (max-width: 768px) {
-            .responsive-table thead {
-                display: none; /* ซ่อนหัวตารางบนมือถือ */
-            }
-            .responsive-table tbody, .responsive-table tr, .responsive-table td {
-                display: block;
-                width: 100%;
-            }
-            .responsive-table td {
-                text-align: right;
-                position: relative;
-                padding-left: 50%; /* พื้นที่สำหรับ Label */
-                border-bottom: 1px solid #e5e7eb;
-            }
-            .responsive-table td::before {
-                content: attr(data-label); /* แสดงหัวข้อเป็น Label */
-                position: absolute;
-                left: 0;
-                width: 45%;
-                padding-left: 15px;
-                font-weight: 600;
-                text-align: left;
-                color: #4b5563;
-            }
-        }
-    </style>
-</head>
-<body class="bg-gray-50 min-h-screen font-sans p-4 md:p-8">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
 
-    <div class="max-w-4xl mx-auto bg-white shadow-2xl rounded-xl p-6 md:p-10">
-
-        <!-- Header -->
-        <header class="text-center mb-8">
-            <h1 class="text-3xl md:text-4xl font-extrabold text-primary-blue mb-2">ระบบแก้ไขผลการเรียน (ป.0)</h1>
-            <p class="text-gray-600">สำหรับครูผู้สอนในการบันทึกผลการแก้ไขรายวิชาที่ไม่ผ่าน</p>
-            <div id="statusMessage" class="mt-4 text-center text-sm font-medium hidden p-3 rounded-lg"></div>
-            <div id="loadingMessage" class="mt-4 text-center text-sm font-medium p-3 rounded-lg bg-blue-100 text-blue-700 block">กำลังโหลดข้อมูลผลการเรียนจากไฟล์ CSV...</div>
-        </header>
-
-        <!-- Mock Data & API Limitation Warning (Update for online use) -->
-        <div class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-6 rounded-lg" role="alert">
-            <p class="font-bold">หมายเหตุสำคัญ: การเชื่อมต่อ Google Sheet</p>
-            <p class="text-sm">ข้อมูลการแสดงผลถูกดึงมาจากไฟล์ **`0รมส - Sheet1.csv`** ที่แนบมา แต่การบันทึกข้อมูลถูกตั้งค่าให้ส่งไปที่ **Google Apps Script Web App** เพื่อบันทึกถาวร กรุณาแทนที่ URL ในโค้ด</p>
-        </div>
-
-        <!-- Teacher Selection -->
-        <div class="mb-8 p-6 bg-primary-blue/10 rounded-lg shadow-inner">
-            <label for="teacherSelect" class="block text-lg font-semibold text-gray-700 mb-2">เลือกชื่อครูผู้สอนและรายวิชา:</label>
-            <select id="teacherSelect" class="w-full p-3 border-2 border-gray-300 rounded-lg focus:border-primary-blue focus:ring focus:ring-primary-blue/50 transition duration-150 ease-in-out bg-white text-gray-800 shadow-sm" disabled>
-                <option value="" disabled selected>-- กรุณารอโหลดข้อมูล หรือเลือกครู --</option>
-            </select>
-        </div>
-
-        <!-- Grade Editing Area -->
-        <div id="gradeArea" class="hidden">
-            <h2 id="subjectTitle" class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2"></h2>
-            
-            <div id="studentTableContainer" class="overflow-x-auto shadow-lg rounded-xl mb-6">
-                <table class="min-w-full responsive-table bg-white divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th scope="col" class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider rounded-tl-xl">รหัสนักเรียน</th>
-                            <th scope="col" class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">ชื่อ-นามสกุล</th>
-                            <th scope="col" class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">สถานะเดิม</th>
-                            <th scope="col" class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">รายวิชาที่ไม่ผ่านอื่น ๆ</th>
-                            <th scope="col" class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider rounded-tr-xl">บันทึกผลการแก้ไข (คะแนนใหม่ 50-100)</th>
-                        </tr>
-                    </thead>
-                    <tbody id="gradeTableBody" class="divide-y divide-gray-200">
-                        <!-- ข้อมูลนักเรียนที่ไม่ผ่านจะถูกสร้างขึ้นที่นี่ -->
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Save Button -->
-            <div class="text-center">
-                <button id="saveButton" class="bg-primary-blue hover:bg-emerald-600 text-white font-bold py-3 px-8 rounded-full shadow-lg transition duration-300 transform hover:scale-105 disabled:opacity-50" disabled>
-                    บันทึกผลการแก้ไข
-                </button>
-            </div>
-        </div>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // Import setDoc and getDoc for data handling
+        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
-        <!-- No Data Message -->
-        <div id="noDataMessage" class="hidden text-center p-8 bg-gray-100 rounded-lg text-gray-600">
-            <svg class="w-10 h-10 mx-auto mb-3 text-primary-blue/70" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-            <p class="text-lg font-medium" id="noDataText">ไม่พบนักเรียนที่ไม่ผ่านในรายวิชาที่ท่านสอน</p>
-            <p>กรุณาเลือกครูผู้สอนท่านอื่น หรือตรวจสอบข้อมูล</p>
-        </div>
+        // --- GLOBAL VARIABLES (Provided by Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-    </div>
-
-    <script>
-        // กำหนดคะแนนต่ำสุดที่ถือว่า "ผ่าน" และสถานะที่ถือว่า "ไม่ผ่าน/ไม่สมบูรณ์"
-        const PASSING_SCORE = 50;
-        const FAILING_STATUSES = ['0', 'มส', 'ร'];
-        const CSV_FETCH_ID = "uploaded:0รมส - Sheet1.csv"; 
+        let db, auth;
+        let isAuthReady = false;
         
-        // ** ต้องเปลี่ยน URL นี้เป็น Web App URL ที่ได้จาก Google Apps Script ของคุณ **
-        const APPS_SCRIPT_URL = 'YOUR_APPS_SCRIPT_WEB_APP_URL'; 
-        
-        // ข้อมูลหลักที่ดึงมาจาก CSV
-        let currentTeachers = [];       // Array of { id: 'Teacher_Subject', name: 'ครู', subject: 'วิชา' }
-        let studentGradesData = [];     // Array of { studentId: 'S001', studentName: 'ชื่อ', grades: { 'Teacher_Subject': '0' } }
+        // GLOBAL DATA
+        window.rawGrades = []; // ข้อมูลดิบทั้งหมดจาก CSV/Firestore
+        window.teacherMap = new Map(); // Map สำหรับ Dropdown ครูผู้สอน
+        window.editedGrades = {}; // {dataIndex: newGrade}
 
-        // State สำหรับเก็บข้อมูลการแก้ไข
-        let editedGrades = {};
-
-        // === DOM Elements ===
-        const teacherSelect = document.getElementById('teacherSelect');
-        const gradeArea = document.getElementById('gradeArea');
-        const subjectTitle = document.getElementById('subjectTitle');
-        const gradeTableBody = document.getElementById('gradeTableBody');
-        const saveButton = document.getElementById('saveButton');
-        const noDataMessage = document.getElementById('noDataMessage');
-        const noDataText = document.getElementById('noDataText');
-        const statusMessage = document.getElementById('statusMessage');
-        const loadingMessage = document.getElementById('loadingMessage');
-
-
-        // === CSV Loading and Parsing Logic ===
-
-        /**
-         * Helper function to simulate fetching file content based on the environment.
-         * In this canvas, __getFileContent is used for the uploaded file.
-         */
-        async function fetchFileContent(contentFetchId) {
-            if (typeof __getFileContent !== 'undefined') {
-                return await __getFileContent(contentFetchId);
-            } else {
-                // Fallback for local testing (using the provided CSV snippet)
-                // ข้อมูลครู: 1. นางชลธิรา ผินโพธิ์, 2. ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์, 3. นายเอกชัย รื่นฤทธิ์
-                const fallbackContent = `รหัสวิชา,ชื่อวิชา,ชั้น/ห้อง,ครูผู้สอน,เลขประจำตัว,ชื่อ-นามสกุล,เลขที่,ปีการศึกษา,ภาคเรียนที่,ผลการเรียน
-ว31201,ฟิสิกส์ 1,ม.4/1,1.นางชลธิรา ผินโพธิ์,6834,นายศราวุธ สีชุมภู,3,2568,1,0
-ว31201,ฟิสิกส์ 1,ม.4/2,1.นางชลธิรา ผินโพธิ์,7400,นายกรวิทย์ ทับแสง,1,2568,1,มส
-ว31201,ฟิสิกส์ 1,ม.4/2,1.นางชลธิรา ผินโพธิ์,7429,นายเจษฎา กลิ่นสบาย,3,2568,1,มส
-ว31201,ฟิสิกส์ 1,ม.4/2,1.นางชลธิรา ผินโพธิ์,6798,นายชินณวัฒ พรมพา,7,2568,1,0
-ว31201,ฟิสิกส์ 1,ม.4/2,1.นางชลธิรา ผินโพธิ์,6771,นายนัฐพร วัดถุมา,10,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,7044,นายจิรายุ เป็นมงคล,5,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,6541,นายศราวุฒิ วิระพันธ์,14,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,6511,น.ส.จิดาภา คงดี,18,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,6516,น.ส.บุษกร พูลผล,22,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,6477,น.ส.ปิยธิดา พุทธิวงศ์,23,2568,1,มส
-พ30213,แบดมินตัน,ม.6/2,1.ว่าที่ร้อยตรีหญิงวรรณา เพ็ญพิมพ์,6559,น.ส.ศิรประภา แก้วยอดคง,29,2568,1,ร
-ง30245,การประดิษฐ์ของใช้จากวัสดุธรรมชาติ,ม.4/1,1.นายเอกชัย รื่นฤทธิ์,6789,น.ส.ชนากานต์ ดีเยี่ยม,11,2568,1,0
-ง30245,การประดิษฐ์ของใช้จากวัสดุธรรมชาติ,ม.4/1,1.นายเอกชัย รื่นฤทธิ์,6790,นายธนวัฒน์ พลอยงาม,12,2568,1,มส
-ง30245,การประดิษฐ์ของใช้จากวัสดุธรรมชาติ,ม.4/2,1.นายเอกชัย รื่นฤทธิ์,7455,น.ส.อรัญญา อ่อนไทร,15,2568,1,0
-`;
-                if (contentFetchId === CSV_FETCH_ID) {
-                    return Promise.resolve(fallbackContent);
-                }
-                throw new Error("File content fetching is simulated for CSV only.");
-            }
-        }
-
-        /**
-         * โหลดและประมวลผลข้อมูล CSV
-         */
-        async function loadCSVData() {
+        // --- Firebase Initialization and Auth ---
+        window.initFirebase = async () => {
             try {
-                const csvContent = await fetchFileContent(CSV_FETCH_ID);
-                const lines = csvContent.split('\n').filter(line => line.trim() !== ''); // กรองบรรทัดว่าง
-                if (lines.length <= 1) {
-                    throw new Error("CSV file is empty or contains only headers.");
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
                 }
 
-                const headers = lines[0].trim().split(',').map(h => h.trim());
+                onAuthStateChanged(auth, (user) => {
+                    isAuthReady = true;
+                    console.log("Firebase Auth State Changed. User ID:", user?.uid || 'Anon');
+                    window.db = db;
+                    window.auth = auth;
+                    window.userId = user?.uid || crypto.randomUUID();
+                    loadRawDataFromFirestoreOrCSV(); // เริ่มโหลดข้อมูลทันทีที่ Auth พร้อม
+                });
+            } catch (e) {
+                console.error("Firebase Initialization Error:", e);
+                showStatus('⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล', 'error');
+            }
+        };
+
+        window.initFirebase();
+
+        // --- Data Paths and Constants ---
+        const RAW_DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/raw_grades/data`;
+        const CSV_FILENAME = '0รมस - Sheet1.csv';
+        const TEACHER_COL = 'ครูผู้สอน';
+        const GRADE_COL = 'ผลการเรียน';
+
+        /**
+         * ดึงข้อมูลดิบจาก Firestore หรือ CSV หากไม่มี
+         */
+        window.loadRawDataFromFirestoreOrCSV = async () => {
+            showStatus('กำลังตรวจสอบข้อมูลดิบที่บันทึกไว้...', 'info');
+            const statusMessage = document.getElementById('statusMessage');
+
+            try {
+                const docRef = doc(db, RAW_DATA_DOC_PATH(appId));
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists() && docSnap.data().data) {
+                    // โหลดจาก Firestore
+                    window.rawGrades = docSnap.data().data;
+                    showStatus(`โหลดข้อมูลดิบสำเร็จ! (${window.rawGrades.length} รายการ)`, 'success');
+                } else {
+                    // โหลดจาก CSV
+                    showStatus('ไม่พบข้อมูลดิบที่บันทึกไว้... กำลังประมวลผลจากไฟล์ CSV...', 'info');
+                    await fetchAndProcessCSV();
+                }
                 
-                // กำหนดดัชนีคอลัมน์ที่ต้องการ
-                const headerMap = {
-                    'ชื่อวิชา': headers.indexOf('ชื่อวิชา'),
-                    'ครูผู้สอน': headers.indexOf('ครูผู้สอน'),
-                    'เลขประจำตัว': headers.indexOf('เลขประจำตัว'),
-                    'ชื่อ-นามสกุล': headers.indexOf('ชื่อ-นามสกุล'),
-                    'ผลการเรียน': headers.indexOf('ผลการเรียน'),
-                };
-                
-                // ตรวจสอบว่าคอลัมน์หลักมีอยู่ครบหรือไม่
-                const requiredHeaders = ['ชื่อวิชา', 'ครูผู้สอน', 'เลขประจำตัว', 'ชื่อ-นามสกุล', 'ผลการเรียน'];
-                if (requiredHeaders.some(h => headerMap[h] === -1)) {
-                    throw new Error("CSV file is missing required columns: " + requiredHeaders.join(', '));
+                // สร้าง Teacher Map และ Initialize UI หลังจากโหลดข้อมูล
+                if (window.rawGrades.length > 0) {
+                    buildTeacherMap();
+                    initializeUI();
+                } else {
+                    document.getElementById('noDataMessage').classList.remove('hidden');
                 }
 
-                const rawData = [];
-                for (let i = 1; i < lines.length; i++) {
-                    const values = lines[i].trim().split(',');
-                    // ใช้ regex ลบคู่ของ quote ที่อาจเกิดจากการ split
-                    const gradeStatus = (values[headerMap['ผลการเรียน']] || '').trim().replace(/^"|"$/g, ''); 
-                    
-                    if (values.length > 1) { // ตรวจสอบว่ามีข้อมูลในแถว
-                        const teacherRaw = values[headerMap['ครูผู้สอน']] || 'Unknown Teacher';
-                        // ทำความสะอาดชื่อครู (ลบ "1. " หรือตัวเลขนำหน้า)
-                        const teacherName = teacherRaw.replace(/^\d+\.\s*/, '').trim(); 
-                        
-                        rawData.push({
-                            subjectName: values[headerMap['ชื่อวิชา']].trim(),
-                            teacher: teacherName,
-                            studentId: values[headerMap['เลขประจำตัว']].trim(),
-                            studentName: values[headerMap['ชื่อ-นามสกุล']].trim(),
-                            gradeStatus: gradeStatus,
-                        });
-                    }
-                }
-                processRawData(rawData);
-                loadingMessage.classList.add('hidden');
-                teacherSelect.disabled = false;
-                showStatus('โหลดข้อมูลสำเร็จแล้ว', 'success');
-
-            } catch (error) {
-                console.error("Error loading or parsing CSV:", error);
-                loadingMessage.classList.add('hidden');
-                noDataText.textContent = `ไม่สามารถโหลดข้อมูลได้: ${error.message}`;
-                noDataMessage.classList.remove('hidden');
-                showStatus('เกิดข้อผิดพลาดในการโหลดข้อมูล CSV', 'error');
+            } catch (e) {
+                showStatus('⚠️ ข้อผิดพลาดในการโหลด/บันทึกข้อมูล กรุณาลองใหม่อีกครั้ง', 'error');
+                console.error("Firestore operation failed:", e);
+                // ในกรณีที่เกิดข้อผิดพลาดกับ Firestore ให้ลองประมวลผลจาก CSV โดยตรง
+                await fetchAndProcessCSV();
             }
-        }
-
-        /**
-         * ประมวลผลข้อมูลดิบจาก CSV เพื่อสร้างโครงสร้างข้อมูลที่ใช้ในแอป
-         * @param {Array<Object>} data ข้อมูลดิบ
-         */
-        function processRawData(data) {
-            const uniqueTeachers = new Map();
-            const studentMap = new Map();
-
-            data.forEach(row => {
-                const teacherId = `${row.teacher}_${row.subjectName}`; // ID คือ TeacherName_SubjectName
-                
-                // 1. Build unique teacher list (เฉพาะวิชาที่มีสถานะไม่ผ่าน)
-                if (FAILING_STATUSES.includes(row.gradeStatus)) {
-                    if (!uniqueTeachers.has(teacherId)) {
-                        currentTeachers.push({
-                            id: teacherId,
-                            name: row.teacher,
-                            subject: row.subjectName
-                        });
-                        uniqueTeachers.set(teacherId, true);
-                    }
-                }
-
-
-                // 2. Build student grade map (เก็บทุกสถานะเพื่อใช้ในการตรวจสอบวิชาที่ไม่ผ่านอื่นๆ)
-                if (!studentMap.has(row.studentId)) {
-                    studentMap.set(row.studentId, {
-                        studentId: row.studentId,
-                        studentName: row.studentName,
-                        grades: {}
-                    });
-                }
-                // Store the grade status using the teacher-subject key
-                studentMap.get(row.studentId).grades[teacherId] = row.gradeStatus;
-            });
-
-            studentGradesData = Array.from(studentMap.values());
-            
-            // เติมข้อมูลลงใน Dropdown ครูผู้สอน
-            currentTeachers.forEach(teacher => {
-                const option = document.createElement('option');
-                option.value = teacher.id;
-                option.textContent = `${teacher.name} (${teacher.subject})`;
-                teacherSelect.appendChild(option);
-            });
-        }
-
-
-        // === Functions ===
-        
-        /**
-         * แสดงข้อความสถานะ (สำเร็จ/ข้อผิดพลาด)
-         * @param {string} message ข้อความที่ต้องการแสดง
-         * @param {string} type 'success' หรือ 'error'
-         */
-        function showStatus(message, type) {
-            statusMessage.textContent = message;
-            statusMessage.className = `mt-4 text-center text-sm font-medium p-3 rounded-lg block`;
-            if (type === 'success') {
-                statusMessage.classList.add('bg-green-100', 'text-green-700');
-            } else if (type === 'error') {
-                statusMessage.classList.add('bg-red-100', 'text-red-700');
-            } else {
-                statusMessage.classList.add('bg-blue-100', 'text-blue-700');
-            }
-            // ซ่อนข้อความสถานะหลังจาก 5 วินาที
-            setTimeout(() => {
-                statusMessage.classList.add('hidden');
-            }, 5000);
-        }
-
-        /**
-         * ค้นหาวิชาที่ไม่ผ่านทั้งหมดของนักเรียน
-         * @param {object} studentData ข้อมูลนักเรียน
-         * @param {string} currentTeacherId ID ครูที่เลือก
-         * @returns {string} รายการวิชาที่ไม่ผ่านอื่นๆ (ยกเว้นวิชาปัจจุบัน)
-         */
-        function getOtherFailedSubjects(studentData, currentTeacherId) {
-            const failedSubjects = [];
-            
-            for (const teacherKey in studentData.grades) {
-                // กรองเฉพาะ key ที่ไม่ใช่ Teacher ID ปัจจุบัน
-                if (teacherKey !== currentTeacherId) {
-                    const gradeStatus = studentData.grades[teacherKey];
-                    // ตรวจสอบว่าสถานะเป็น 0, มส, หรือ ร
-                    if (FAILING_STATUSES.includes(gradeStatus)) {
-                        // ค้นหาวิชาจาก currentTeachers โดยใช้ teacherKey
-                        const teacherInfo = currentTeachers.find(t => t.id === teacherKey);
-                        if (teacherInfo) {
-                            failedSubjects.push(`${teacherInfo.subject} (${gradeStatus})`);
-                        }
-                    }
-                }
-            }
-            
-            if (failedSubjects.length === 0) {
-                return '<span class="text-gray-500">ผ่านทุกวิชาอื่น/ไม่มีข้อมูล</span>';
-            } else {
-                return failedSubjects.map(sub => `<span class="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap">${sub}</span>`).join(' ');
-            }
-        }
-
-        /**
-         * ดึงและแสดงข้อมูลนักเรียนที่ไม่ผ่านในรายวิชาที่ครูเลือก
-         */
-        function renderGrades() {
-            const selectedTeacherId = teacherSelect.value;
-            if (!selectedTeacherId) return;
-
-            // ค้นหาข้อมูลครู
-            const teacher = currentTeachers.find(t => t.id === selectedTeacherId);
-            if (!teacher) return;
-
-            // กรองนักเรียนที่ได้ผลการเรียนอยู่ในสถานะที่ไม่ผ่าน
-            const failingStudents = studentGradesData.filter(student => {
-                const status = student.grades[selectedTeacherId];
-                return FAILING_STATUSES.includes(status);
-            });
-
-            // ตั้งค่า UI
-            gradeTableBody.innerHTML = '';
-            subjectTitle.textContent = `รายชื่อนักเรียนที่มีสถานะ ${FAILING_STATUSES.join(', ')} วิชา: ${teacher.subject} โดย ${teacher.name}`;
-            editedGrades = {}; // รีเซ็ตข้อมูลที่แก้ไข
-
-            if (failingStudents.length === 0) {
-                gradeArea.classList.add('hidden');
-                noDataText.textContent = `ไม่พบนักเรียนที่มีสถานะ ${FAILING_STATUSES.join(', ')} ในวิชา ${teacher.subject}`;
-                noDataMessage.classList.remove('hidden');
-                saveButton.disabled = true;
-                return;
-            }
-
-            // แสดงตารางและซ่อนข้อความไม่มีข้อมูล
-            gradeArea.classList.remove('hidden');
-            noDataMessage.classList.add('hidden');
-            saveButton.disabled = true; // เริ่มต้นปิดปุ่มบันทึก
-
-            // สร้างแถวในตาราง
-            failingStudents.forEach(student => {
-                const originalStatus = student.grades[selectedTeacherId];
-                const studentKey = `${student.studentId}_${selectedTeacherId}`; // Key สำหรับติดตามการแก้ไข
-                const otherFailedSubjectsHtml = getOtherFailedSubjects(student, selectedTeacherId); 
-
-                const tr = document.createElement('tr');
-                tr.className = 'hover:bg-gray-50 transition duration-100';
-                
-                tr.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900" data-label="รหัสนักเรียน">${student.studentId}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600" data-label="ชื่อ-นามสกุล">${student.studentName}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-600" data-label="สถานะเดิม">${originalStatus}</td>
-                    <td class="px-6 py-4 text-sm text-gray-800" data-label="รายวิชาที่ไม่ผ่านอื่น ๆ">${otherFailedSubjectsHtml}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-800" data-label="บันทึกผลการแก้ไข (คะแนนใหม่)">
-                        <input 
-                            type="number" 
-                            min="${PASSING_SCORE}" 
-                            max="100" 
-                            value="" 
-                            placeholder="${PASSING_SCORE} - 100"
-                            data-key="${studentKey}"
-                            data-studentid="${student.studentId}"
-                            data-teacherid="${selectedTeacherId}"
-                            class="w-full max-w-[150px] p-2 border border-gray-300 rounded-md focus:border-primary-blue focus:ring focus:ring-primary-blue/50 text-center"
-                            oninput="handleGradeChange(this)"
-                        />
-                        <span id="error-${studentKey}" class="text-xs text-red-500 block mt-1"></span>
-                    </td>
-                `;
-                gradeTableBody.appendChild(tr);
-            });
-        }
-
-        /**
-         * จัดการเมื่อมีการป้อนคะแนนใหม่
-         * @param {HTMLInputElement} inputElement 
-         */
-        window.handleGradeChange = function(inputElement) {
-            const key = inputElement.getAttribute('data-key');
-            const studentId = inputElement.getAttribute('data-studentid');
-            const teacherId = inputElement.getAttribute('data-teacherid');
-            const score = parseInt(inputElement.value);
-            const errorSpan = document.getElementById(`error-${key}`);
-
-            // ค้นหาสถานะเดิม
-            const student = studentGradesData.find(s => s.studentId === studentId);
-            const originalStatus = student ? student.grades[teacherId] : 'N/A';
-            
-            let isValid = true;
-            
-            if (isNaN(score) || inputElement.value === '') {
-                delete editedGrades[key];
-                errorSpan.textContent = '';
-            } else if (score < PASSING_SCORE || score > 100) {
-                errorSpan.textContent = `ต้อง >= ${PASSING_SCORE} และ <= 100`;
-                isValid = false;
-                delete editedGrades[key];
-            } else {
-                errorSpan.textContent = '';
-                // บันทึกข้อมูลที่แก้ไข
-                editedGrades[key] = {
-                    studentId: studentId,
-                    teacherId: teacherId, // TeacherName_SubjectName
-                    newScore: score,
-                    originalStatus: originalStatus 
-                };
-            }
-
-            // ตรวจสอบว่ามีข้อมูลที่แก้ไขที่ถูกต้องอย่างน้อย 1 รายการ
-            const hasValidEdits = Object.keys(editedGrades).length > 0 && 
-                                  Object.values(editedGrades).every(edit => edit.newScore >= PASSING_SCORE && edit.newScore <= 100);
-            
-            saveButton.disabled = !hasValidEdits;
         };
 
         /**
-         * ส่งข้อมูลการแก้ไขไปยัง Google Apps Script Web App เพื่อบันทึกถาวร
+         * ดึงไฟล์ CSV มาประมวลผลและบันทึกเข้า Firestore เป็นข้อมูลดิบ
          */
-        async function handleSave() {
-            // 1. ตรวจสอบความถูกต้องขั้นสุดท้าย
-            if (Object.keys(editedGrades).length === 0) {
-                showStatus('ไม่มีข้อมูลการแก้ไขที่ต้องบันทึก', 'error');
-                return;
-            }
+        window.fetchAndProcessCSV = async () => {
+            const statusMessage = document.getElementById('statusMessage');
 
-            // ตรวจสอบว่าได้ตั้งค่า URL แล้วหรือไม่
-            if (APPS_SCRIPT_URL === 'YOUR_APPS_SCRIPT_WEB_APP_URL' || !APPS_SCRIPT_URL) {
-                console.error("APPS_SCRIPT_URL is not configured.");
-                showStatus('การตั้งค่า URL สำหรับบันทึกข้อมูลยังไม่สมบูรณ์ (กรุณาแก้ไขในโค้ด)', 'error');
-                return;
-            }
-
-            saveButton.disabled = true;
-            saveButton.textContent = 'กำลังบันทึก...';
-
-            // 2. จัดรูปแบบข้อมูลสำหรับส่งออก
-            const payload = Object.values(editedGrades).map(edit => {
-                const teacherInfo = currentTeachers.find(t => t.id === edit.teacherId);
-                return {
-                    'รหัสนักเรียน': edit.studentId,
-                    'ชื่อนักเรียน': studentGradesData.find(s => s.studentId === edit.studentId)?.studentName || 'N/A',
-                    'วิชาที่แก้ไข': teacherInfo ? teacherInfo.subject : 'N/A',
-                    'ครูผู้สอน': teacherInfo ? teacherInfo.name : 'N/A',
-                    'สถานะเดิม': edit.originalStatus,
-                    'คะแนนแก้ไข': edit.newScore,
-                    'วันที่บันทึก': new Date().toISOString().split('T')[0] 
-                };
-            });
-
-            // 3. ส่งข้อมูลไปยัง Apps Script Web App
             try {
-                const response = await fetch(APPS_SCRIPT_URL, {
-                    method: 'POST',
-                    mode: 'cors', // ต้องเปิด CORS สำหรับ Apps Script
-                    cache: 'no-cache',
-                    headers: {
-                        'Content-Type': 'text/plain;charset=utf-8', // Apps Script ชอบ 'text/plain' สำหรับ JSON ใน Body
+                const response = await fetch(CSV_FILENAME);
+                if (!response.ok) throw new Error('CSV file not found or inaccessible.');
+                
+                const csvText = await response.text();
+
+                PapaParse.parse(csvText, {
+                    header: true,
+                    dynamicTyping: false, // ใช้ false เพื่อให้ Grade เป็น String
+                    skipEmptyLines: true,
+                    encoding: "TIS-620",
+                    complete: async function(results) {
+                        // กรองเฉพาะเกรดที่ต้องการแก้ไข (มส, ร, 0)
+                        window.rawGrades = results.data.filter(row => 
+                            ['มส', 'ร', '0'].includes(String(row[GRADE_COL]).trim())
+                        );
+
+                        // บันทึกข้อมูลดิบที่กรองแล้วลง Firestore
+                        await saveRawDataToFirestore(window.rawGrades);
+                        showStatus(`ประมวลผลจาก CSV สำเร็จ! บันทึก ${window.rawGrades.length} รายการลง Firestore`, 'success');
                     },
-                    body: JSON.stringify(payload)
+                    error: function(error) {
+                        showStatus(`เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: ${error.message}`, 'error');
+                        console.error("PapaParse Error:", error);
+                    }
                 });
 
-                const result = await response.json();
+            } catch (e) {
+                showStatus(`⚠️ ข้อผิดพลาดในการดึงไฟล์ ${CSV_FILENAME} กรุณาตรวจสอบว่าคุณอัปโหลดไฟล์แล้ว`, 'error');
+                console.error("Fetch CSV Error:", e);
+            }
+        };
 
-                if (result.status === 'success') {
-                    showStatus(`บันทึกผลการแก้ไขสำเร็จ ${payload.length} รายการ`, 'success');
-                    
-                    // 4. รีเซ็ตสถานะ
-                    teacherSelect.value = '';
-                    gradeArea.classList.add('hidden');
-                    noDataMessage.classList.add('hidden');
-                    editedGrades = {};
+        /**
+         * บันทึกข้อมูลดิบทั้งหมดลงใน Firestore
+         * @param {Array<Object>} data ข้อมูลดิบที่ถูกแก้ไข
+         */
+        async function saveRawDataToFirestore(data) {
+            const rawDataObject = {
+                data: data, // ข้อมูลดิบทั้งหมดที่ใช้ในการแก้ไข
+                timestamp: Date.now(),
+                appId: appId
+            };
 
-                } else {
-                    console.error("Apps Script Error:", result.message);
-                    showStatus(`บันทึกข้อมูลไม่สำเร็จ: ${result.message}`, 'error');
+            const docRef = doc(db, RAW_DATA_DOC_PATH(appId));
+            // ใช้ setDoc เพื่อ overwrite ข้อมูลทั้งหมดด้วยชุดข้อมูลล่าสุด
+            await setDoc(docRef, rawDataObject);
+        }
+
+    </script>
+
+    <!-- ส่วนสำหรับโค้ด JS ที่เหลือ (ไม่เกี่ยวกับ Firebase) -->
+    <script>
+        // Constants for UI and Data
+        const teacherSelect = document.getElementById('teacherSelect');
+        const saveButton = document.getElementById('saveButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const gradeArea = document.getElementById('gradeArea');
+        const noDataMessage = document.getElementById('noDataMessage');
+        const GRADES = ['มส', 'ร', '0', '1', '1.5', '2', '2.5', '3', '3.5', '4'];
+        
+        // ฟังก์ชันแสดงสถานะ
+        function showStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            statusMessage.className = `text-center p-3 rounded-lg mt-4 text-white font-medium shadow-md transition duration-300`;
+            switch (type) {
+                case 'success':
+                    statusMessage.classList.add('bg-green-500');
+                    break;
+                case 'error':
+                    statusMessage.classList.add('bg-red-500');
+                    break;
+                case 'info':
+                default:
+                    statusMessage.classList.add('bg-blue-500');
+                    break;
+            }
+            statusMessage.classList.remove('hidden');
+        }
+
+        /**
+         * สร้าง Map ของครูผู้สอนเพื่อใช้ใน Dropdown
+         */
+        function buildTeacherMap() {
+            const tempMap = new Map();
+            window.rawGrades.forEach((row, index) => {
+                const teacherName = String(row[TEACHER_COL]).trim();
+                
+                if (teacherName) {
+                    if (!tempMap.has(teacherName)) {
+                        tempMap.set(teacherName, []);
+                    }
+                    // เก็บ index ของ row ใน rawGrades เพื่อใช้ในการแก้ไข
+                    tempMap.get(teacherName).push({ ...row, dataIndex: index }); 
                 }
+            });
+            window.teacherMap = tempMap;
+        }
 
+        /**
+         * สร้าง UI Dropdown และ Listener
+         */
+        function initializeUI() {
+            // เติม Dropdown
+            teacherSelect.innerHTML = '<option value="">--- เลือกครูผู้สอน ---</option>';
+            Array.from(window.teacherMap.keys()).sort().forEach(teacherName => {
+                const option = document.createElement('option');
+                option.value = teacherName;
+                option.textContent = teacherName;
+                teacherSelect.appendChild(option);
+            });
+
+            // 3. เพิ่ม Event Listener หลังจากโหลดข้อมูลสำเร็จ
+            teacherSelect.addEventListener('change', () => {
+                statusMessage.classList.add('hidden'); // ซ่อนสถานะเมื่อเลือกใหม่
+                renderGrades();
+            });
+
+            saveButton.addEventListener('click', handleSave);
+            saveButton.disabled = true; // เริ่มต้นปิดปุ่มบันทึก
+        }
+        
+        /**
+         * แสดงตารางผลการเรียนที่ต้องแก้ไขสำหรับครูที่เลือก
+         */
+        function renderGrades() {
+            const selectedTeacher = teacherSelect.value;
+            const gradesForTeacher = window.teacherMap.get(selectedTeacher) || [];
+            const gradeTableBody = document.getElementById('gradeTableBody');
+            gradeTableBody.innerHTML = '';
+            
+            window.editedGrades = {}; // รีเซ็ตการแก้ไขเมื่อเปลี่ยนครู
+            saveButton.disabled = true;
+
+            if (!selectedTeacher || gradesForTeacher.length === 0) {
+                gradeArea.classList.add('hidden');
+                return;
+            }
+
+            // จัดเรียงตามชั้น/ห้อง และเลขประจำตัว
+            gradesForTeacher.sort((a, b) => {
+                const classA = a['ชั้น/ห้อง'] || '';
+                const classB = b['ชั้น/ห้อง'] || '';
+                const idA = a['เลขประจำตัว'] || '';
+                const idB = b['เลขประจำตัว'] || '';
+
+                const classCompare = classA.localeCompare(classB);
+                if (classCompare !== 0) return classCompare;
+                
+                return String(idA).localeCompare(String(idB));
+            });
+
+            gradesForTeacher.forEach((row, index) => {
+                const tr = gradeTableBody.insertRow();
+                tr.className = 'hover:bg-gray-50 transition duration-100';
+
+                tr.insertCell().textContent = index + 1;
+                tr.insertCell().textContent = row['เลขประจำตัว'] || '-';
+                tr.insertCell().textContent = row['ชื่อ-นามสกุล'] || '-';
+                tr.insertCell().textContent = row['ชั้น/ห้อง'] || '-';
+                tr.insertCell().textContent = `${row['ชื่อวิชา']} (${row['รหัสวิชา']})`;
+
+                // Cell สำหรับเกรดปัจจุบัน
+                const currentGradeCell = tr.insertCell();
+                currentGradeCell.textContent = row[GRADE_COL];
+                currentGradeCell.className = 'font-bold text-orange-600';
+                
+                // Cell สำหรับการแก้ไข
+                const editCell = tr.insertCell();
+                const select = document.createElement('select');
+                select.className = 'p-1 border rounded-md w-full focus:ring-blue-500 focus:border-blue-500 transition duration-100';
+                select.setAttribute('data-index', row.dataIndex);
+
+                // สร้างตัวเลือกเกรด
+                GRADES.forEach(grade => {
+                    const option = document.createElement('option');
+                    option.value = grade;
+                    option.textContent = grade;
+                    // ไม่ต้องเลือกค่าเริ่มต้น
+                    select.appendChild(option);
+                });
+                select.value = ''; // ให้ค่าเริ่มต้นเป็นว่าง (ไม่เลือก)
+                
+                select.addEventListener('change', (e) => {
+                    const dataIndex = e.target.getAttribute('data-index');
+                    const newGrade = e.target.value;
+                    
+                    if (newGrade && newGrade !== row[GRADE_COL]) {
+                        window.editedGrades[dataIndex] = newGrade;
+                        e.target.classList.remove('border-gray-300');
+                        e.target.classList.add('border-green-500', 'ring-2', 'ring-green-200');
+                    } else {
+                         // ลบรายการแก้ไขออกถ้าเลือกเป็นเกรดเดิมหรือว่าง
+                        delete window.editedGrades[dataIndex];
+                        e.target.classList.add('border-gray-300');
+                        e.target.classList.remove('border-green-500', 'ring-2', 'ring-green-200');
+                    }
+                    
+                    // เปิด/ปิดปุ่มบันทึก
+                    saveButton.disabled = Object.keys(window.editedGrades).length === 0;
+                });
+
+                editCell.appendChild(select);
+            });
+
+            gradeArea.classList.remove('hidden');
+        }
+
+        /**
+         * จัดการการบันทึกข้อมูลไปยัง Firestore
+         */
+        async function handleSave() {
+            if (Object.keys(window.editedGrades).length === 0) {
+                showStatus('ไม่มีการแก้ไขใดๆ ที่ต้องบันทึก', 'info');
+                return;
+            }
+            
+            showStatus('กำลังบันทึกผลการแก้ไข...', 'info');
+            saveButton.disabled = true;
+            saveButton.textContent = 'กำลังบันทึก...';
+            
+            try {
+                // 1. นำการแก้ไขไปใช้กับ rawGrades
+                const gradesToSave = [...window.rawGrades]; // ทำสำเนา
+                let editCount = 0;
+                
+                for (const dataIndex in window.editedGrades) {
+                    const index = parseInt(dataIndex);
+                    if (gradesToSave[index]) {
+                        gradesToSave[index][GRADE_COL] = window.editedGrades[dataIndex];
+                        editCount++;
+                    }
+                }
+                
+                // 2. บันทึก rawGrades ที่แก้ไขแล้วกลับไปยัง Firestore
+                await saveRawDataToFirestore(gradesToSave);
+                
+                // 3. อัปเดตข้อมูลในหน่วยความจำและ UI
+                window.rawGrades = gradesToSave;
+                buildTeacherMap(); // สร้าง Map ใหม่เพื่อรวมการเปลี่ยนแปลง
+                renderGrades(); // แสดงตารางใหม่ (ซึ่งจะรีเซ็ต editedGrades ด้วย)
+                
+                showStatus(`✅ บันทึกผลการแก้ไขจำนวน ${editCount} รายการสำเร็จ!`, 'success');
+                
+                // Note: การบันทึกข้อมูลดิบนี้ จะทำให้ index.html ต้องถูกประมวลผลใหม่ หากคุณต้องการให้มันอัปเดตแบบ Real-time คุณจะต้องไปแก้ไข index.html ให้เรียกใช้ 'reset data' หรือ 'reprocess csv' อัตโนมัติเมื่อข้อมูลดิบเปลี่ยน
+                
             } catch (error) {
-                console.error("Fetch Error:", error);
-                showStatus('เกิดข้อผิดพลาดในการเชื่อมต่อกับเซิร์ฟเวอร์', 'error');
+                console.error("Firestore Save Error:", error);
+                showStatus('⚠️ บันทึกข้อมูลไม่สำเร็จ: กรุณาลองใหม่อีกครั้ง', 'error');
 
             } finally {
                 saveButton.disabled = true;
                 saveButton.textContent = 'บันทึกผลการแก้ไข';
             }
         }
-
-        /**
-         * เตรียมข้อมูลเริ่มต้นและเพิ่ม Listener
-         */
-        function initialize() {
-            // โหลดและประมวลผลข้อมูล CSV ก่อน
-            loadCSVData().then(() => {
-                // 3. เพิ่ม Event Listener หลังจากโหลดข้อมูลสำเร็จ
-                teacherSelect.addEventListener('change', () => {
-                    statusMessage.classList.add('hidden'); // ซ่อนสถานะเมื่อเลือกใหม่
-                    renderGrades();
-                });
-
-                saveButton.addEventListener('click', handleSave);
-            });
-        }
-
-        // เริ่มต้นการทำงานเมื่อหน้าเว็บโหลดเสร็จ
-        window.onload = initialize;
-
     </script>
+
+    <style>
+        .container-card {
+            box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .data-table th, .data-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .data-table th {
+            background-color: #f3f4f6;
+            font-weight: 600;
+            color: #1f2937;
+            text-transform: uppercase;
+        }
+        @media (max-width: 768px) {
+            .data-table thead { display: none; }
+            .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+            .data-table tr { 
+                margin-bottom: 1rem; 
+                border: 1px solid #e5e7eb; 
+                border-radius: 0.5rem;
+                display: flex;
+                flex-wrap: wrap;
+                padding: 1rem 0.5rem;
+            }
+            .data-table td { 
+                text-align: right; 
+                padding: 0.5rem; 
+                border-bottom: none;
+                position: relative;
+            }
+            .data-table td:before {
+                content: attr(data-label);
+                position: absolute;
+                left: 10px;
+                width: 50%;
+                padding-right: 10px;
+                white-space: nowrap;
+                text-align: left;
+                font-weight: 600;
+                color: #4b5563;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col items-center p-4 sm:p-8">
+
+    <div class="w-full max-w-4xl bg-white rounded-xl container-card p-6 md:p-8">
+        <h1 class="text-3xl font-bold text-blue-700 mb-2 text-center">
+            ระบบแก้ไขผลการเรียน มส/ร (Grade Editor)
+        </h1>
+        <p class="text-gray-600 mb-6 text-center">
+            แก้ไขผลการเรียน "มส", "ร", "0" และบันทึกผลไปยังฐานข้อมูล
+        </p>
+
+        <!-- ส่วนเลือกครูผู้สอน -->
+        <div class="mb-6 p-4 border rounded-lg bg-blue-50 shadow-inner">
+            <label for="teacherSelect" class="block text-lg font-medium text-gray-700 mb-2">
+                เลือกครูผู้สอนเพื่อเริ่มแก้ไข:
+            </label>
+            <select id="teacherSelect" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 shadow-sm">
+                <option value="">-- กำลังโหลดข้อมูล... --</option>
+            </select>
+        </div>
+        
+        <!-- ข้อความสถานะ -->
+        <div id="statusMessage" class="hidden"></div>
+        
+        <!-- ส่วนแสดงผลการเรียนที่ต้องแก้ไข -->
+        <div id="gradeArea" class="hidden mt-8">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">
+                รายการผลการเรียนที่ต้องแก้ไข
+            </h2>
+            
+            <div class="overflow-x-auto rounded-lg shadow-md mb-6">
+                <table class="min-w-full data-table">
+                    <thead>
+                        <tr>
+                            <th class="w-1/12">ลำดับ</th>
+                            <th class="w-2/12">เลขประจำตัว</th>
+                            <th class="w-2/12">ชื่อ-นามสกุล</th>
+                            <th class="w-1/12">ชั้น/ห้อง</th>
+                            <th class="w-3/12">วิชา (รหัส)</th>
+                            <th class="w-1/12">เกรดเดิม</th>
+                            <th class="w-2/12">แก้ไขเป็น</th>
+                        </tr>
+                    </thead>
+                    <tbody id="gradeTableBody">
+                        <!-- รายการจะถูกแทรกที่นี่ -->
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="text-center">
+                <button id="saveButton" disabled class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition duration-150 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-lg">
+                    บันทึกผลการแก้ไข
+                </button>
+            </div>
+        </div>
+
+        <!-- ข้อความเมื่อไม่มีข้อมูล -->
+        <div id="noDataMessage" class="hidden mt-8 text-center p-6 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 rounded-lg">
+            <p class="font-bold">ไม่พบข้อมูลผลการเรียน "มส", "ร", "0" ในระบบ</p>
+            <p class="text-sm mt-2">กรุณาตรวจสอบว่าไฟล์ **0รมส - Sheet1.csv** ได้รับการอัปโหลดแล้ว</p>
+        </div>
+
+    </div>
 </body>
 </html>
