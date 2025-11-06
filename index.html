@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบจัดการผลการเรียน มส/ร</title>
+    <!-- โหลด Tailwind CSS และ PapaParse -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- GLOBAL VARIABLES (Provided by Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth;
+        let isAuthReady = false;
+
+        // --- Firebase Initialization and Auth ---
+        window.initFirebase = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    isAuthReady = true;
+                    console.log("Firebase Auth State Changed. User ID:", user?.uid || 'Anon');
+                    window.db = db; // ทำให้ db ใช้ได้ทั่วโลก
+                    window.auth = auth; // ทำให้ auth ใช้ได้ทั่วโลก
+                    window.userId = user?.uid || crypto.randomUUID();
+                    loadDataFromFirestoreOrCSV(); // เริ่มโหลดข้อมูลทันทีที่ Auth พร้อม
+                });
+            } catch (e) {
+                console.error("Firebase Initialization Error:", e);
+                document.getElementById('statusMessage').textContent = '⚠️ เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล';
+            }
+        };
+
+        window.initFirebase();
+
+        // --- Main Data Handling Functions ---
+        
+        const DATA_DOC_PATH = (appId) => `artifacts/${appId}/public/data/grade_summary/summary`;
+
+        /**
+         * 1. ตรวจสอบข้อมูลใน Firestore
+         * 2. ถ้ามี: ดึงข้อมูลจาก Firestore
+         * 3. ถ้าไม่มี: ดึงไฟล์ CSV ที่อัปโหลดไว้, ประมวลผล, บันทึกใน Firestore และแสดงผล
+         */
+        window.loadDataFromFirestoreOrCSV = async () => {
+            const statusMessage = document.getElementById('statusMessage');
+            statusMessage.textContent = 'กำลังตรวจสอบข้อมูลที่บันทึกไว้...';
+
+            try {
+                const docRef = doc(db, DATA_DOC_PATH(appId));
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists() && docSnap.data().teacherSummary) {
+                    const data = docSnap.data();
+                    statusMessage.textContent = `โหลดข้อมูลสำเร็จ! อัปเดตล่าสุด: ${new Date(data.timestamp).toLocaleString('th-TH')}`;
+                    window.teacherSummaryMap = new Map(JSON.parse(data.teacherSummary)); // โหลด Map
+                    renderSummaryTable(window.teacherSummaryMap);
+                } else {
+                    statusMessage.textContent = 'ไม่พบข้อมูลที่บันทึกไว้... กำลังประมวลผลจากไฟล์ CSV อัตโนมัติ...';
+                    await fetchAndProcessCSV();
+                }
+
+                document.getElementById('resultsContainer').classList.remove('hidden');
+
+            } catch (e) {
+                statusMessage.textContent = '⚠️ ข้อผิดพลาดในการโหลด/บันทึกข้อมูล กรุณาลองใหม่อีกครั้ง';
+                console.error("Firestore operation failed:", e);
+                // ในกรณีที่เกิดข้อผิดพลาดกับ Firestore ให้ลองประมวลผลจาก CSV โดยตรง
+                await fetchAndProcessCSV();
+            }
+        };
+
+        /**
+         * ดึงไฟล์ CSV ที่อัปโหลดไว้มาประมวลผล
+         */
+        window.fetchAndProcessCSV = async () => {
+            const fileName = '0รมส - Sheet1.csv';
+            const statusMessage = document.getElementById('statusMessage');
+            
+            try {
+                // Fetch CSV content
+                const response = await fetch(fileName);
+                if (!response.ok) throw new Error('CSV file not found or inaccessible.');
+                
+                const csvText = await response.text();
+
+                // Parse CSV using PapaParse
+                PapaParse.parse(csvText, {
+                    header: true,
+                    dynamicTyping: true,
+                    skipEmptyLines: true,
+                    encoding: "TIS-620", // สำคัญสำหรับภาษาไทย
+                    complete: async function(results) {
+                        const summaryMap = processData(results.data);
+                        window.teacherSummaryMap = summaryMap; // บันทึกใน window เพื่อใช้ใน function อื่น
+                        
+                        await saveSummaryToFirestore(summaryMap);
+                        renderSummaryTable(summaryMap);
+                        statusMessage.textContent = 'ประมวลผลจากไฟล์ CSV และบันทึกข้อมูลเรียบร้อยแล้ว!';
+                    },
+                    error: function(error) {
+                        statusMessage.textContent = `เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: ${error.message}`;
+                        console.error("PapaParse Error:", error);
+                    }
+                });
+
+            } catch (e) {
+                statusMessage.textContent = `⚠️ ข้อผิดพลาดในการดึงไฟล์ ${fileName} กรุณาตรวจสอบว่าคุณอัปโหลดไฟล์แล้ว`;
+                console.error("Fetch CSV Error:", e);
+            }
+        };
+
+        /**
+         * บันทึกข้อมูลสรุปลงใน Firestore
+         * @param {Map} summaryMap ข้อมูลสรุป
+         */
+        async function saveSummaryToFirestore(summaryMap) {
+            const summaryObject = {
+                teacherSummary: JSON.stringify(Array.from(summaryMap.entries())), // แปลง Map เป็น String
+                timestamp: Date.now(),
+                appId: appId
+            };
+
+            const docRef = doc(db, DATA_DOC_PATH(appId));
+            await setDoc(docRef, summaryObject);
+        }
+    </script>
+
+    <!-- ส่วนสำหรับโค้ด JS ที่เหลือ (ไม่เกี่ยวกับ Firebase) -->
+    <script>
+        const STATUS = ['มส', 'ร', '0']; // ผลการเรียนที่ต้องการติดตาม
+
+        /**
+         * ประมวลผลข้อมูลจาก CSV เพื่อจัดกลุ่มตามครูผู้สอน
+         * @param {Array<Object>} data ข้อมูล CSV ที่ถูก Parse แล้ว
+         * @returns {Map} teacherSummaryMap
+         */
+        function processData(data) {
+            const teacherSummaryMap = new Map();
+
+            const TEACHER_COL = 'ครูผู้สอน';
+            const STUDENT_ID_COL = 'เลขประจำตัว';
+            const STUDENT_NAME_COL = 'ชื่อ-นามสกุล';
+            const CLASS_COL = 'ชั้น/ห้อง';
+            const SUBJECT_CODE_COL = 'รหัสวิชา';
+            const SUBJECT_NAME_COL = 'ชื่อวิชา';
+            const GRADE_COL = 'ผลการเรียน';
+
+            data.forEach(row => {
+                const grade = String(row[GRADE_COL] || '').trim();
+                
+                if (STATUS.includes(grade) && row[TEACHER_COL]) {
+                    const teacherName = String(row[TEACHER_COL]).trim();
+                    const studentKey = `${row[STUDENT_ID_COL]}-${row[STUDENT_NAME_COL]}`;
+
+                    if (!teacherSummaryMap.has(teacherName)) {
+                        teacherSummaryMap.set(teacherName, {
+                            subjects: new Set(),
+                            students: new Map()
+                        });
+                    }
+
+                    const teacherData = teacherSummaryMap.get(teacherName);
+                    teacherData.subjects.add(`${row[SUBJECT_CODE_COL]} - ${row[SUBJECT_NAME_COL]} (${row[CLASS_COL]})`);
+                    
+                    if (!teacherData.students.has(studentKey)) {
+                        teacherData.students.set(studentKey, {
+                            studentId: row[STUDENT_ID_COL],
+                            studentName: row[STUDENT_NAME_COL],
+                            class: row[CLASS_COL],
+                            grades: []
+                        });
+                    }
+                    
+                    teacherData.students.get(studentKey).grades.push({
+                        subjectCode: row[SUBJECT_CODE_COL],
+                        subjectName: row[SUBJECT_NAME_COL],
+                        grade: grade,
+                    });
+                }
+            });
+
+            // แปลง Set และ Map ภายในให้เป็น Array สำหรับ JSON Serialization
+            const finalMap = new Map();
+            teacherSummaryMap.forEach((data, teacherName) => {
+                finalMap.set(teacherName, {
+                    subjects: Array.from(data.subjects),
+                    students: Array.from(data.students.values()).sort((a, b) => a.class.localeCompare(b.class))
+                });
+            });
+
+            return finalMap;
+        }
+
+
+        /**
+         * แสดงผลตารางสรุปครูผู้สอน
+         * @param {Map} summaryMap ข้อมูลสรุป
+         */
+        function renderSummaryTable(summaryMap) {
+            const tbody = document.getElementById('teacherSummaryTable').querySelector('tbody');
+            tbody.innerHTML = '';
+            
+            const sortedTeachers = Array.from(summaryMap.entries()).sort((a, b) => {
+                return b[1].students.length - a[1].students.length;
+            });
+
+            sortedTeachers.forEach(([teacherName, data]) => {
+                const studentCount = data.students.length;
+                const subjectCount = data.subjects.length;
+
+                const row = tbody.insertRow();
+                row.className = 'hover:bg-blue-50 transition duration-150';
+
+                row.insertCell().textContent = teacherName;
+                row.insertCell().textContent = subjectCount;
+                row.insertCell().textContent = studentCount + ' คน';
+
+                const detailCell = row.insertCell();
+                const button = document.createElement('button');
+                button.textContent = 'ดูรายละเอียด';
+                button.className = 'bg-primary-blue hover:bg-blue-800 text-white font-bold py-1 px-3 rounded text-sm transition duration-150';
+                button.addEventListener('click', () => renderStudentDetail(teacherName, data));
+                detailCell.appendChild(button);
+            });
+
+            document.getElementById('studentDetailContainer').classList.add('hidden');
+        }
+
+        /**
+         * แสดงรายละเอียดนักเรียนสำหรับครูผู้สอนที่เลือก
+         */
+        function renderStudentDetail(teacherName, data) {
+            const detailHeader = document.getElementById('detailHeader').querySelector('span');
+            const studentDetailContainer = document.getElementById('studentDetailContainer');
+            const studentDetailDiv = document.getElementById('studentDetail');
+            
+            studentDetailContainer.classList.remove('hidden');
+            detailHeader.textContent = teacherName;
+            studentDetailDiv.innerHTML = '';
+
+            const students = data.students.flatMap(student => 
+                student.grades.map(grade => ({
+                    studentId: student.studentId,
+                    studentName: student.studentName,
+                    class: student.class,
+                    ...grade
+                }))
+            );
+
+            // จัดเรียงตามชั้น/ห้อง และเลขประจำตัว
+            students.sort((a, b) => {
+                if (a.class < b.class) return -1;
+                if (a.class > b.class) return 1;
+                return String(a.studentId).localeCompare(String(b.studentId));
+            });
+            
+            const rowsHtml = students.map((student, index) => {
+                const gradeClass = student.grade === '0' ? 'text-secondary-red font-bold' : 'text-orange-600 font-bold';
+                return `
+                    <tr class="hover:bg-gray-50">
+                        <td class="w-1/12">${index + 1}</td>
+                        <td class="w-2/12">${student.studentId}</td>
+                        <td class="w-3/12">${student.studentName}</td>
+                        <td class="w-1/12">${student.class}</td>
+                        <td class="w-3/12">${student.subjectName} (${student.subjectCode})</td>
+                        <td class="w-1/12 ${gradeClass}">${student.grade}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            const tableHtml = `
+                <table class="min-w-full data-table bg-white rounded-lg overflow-hidden shadow-sm">
+                    <thead>
+                        <tr>
+                            <th class="w-1/12">ลำดับ</th>
+                            <th class="w-2/12">เลขประจำตัว</th>
+                            <th class="w-3/12">ชื่อ-นามสกุล</th>
+                            <th class="w-1/12">ชั้น/ห้อง</th>
+                            <th class="w-3/12">วิชา (รหัส)</th>
+                            <th class="w-1/12">ผลการเรียน</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHtml}
+                    </tbody>
+                </table>
+            `;
+
+            studentDetailDiv.innerHTML = tableHtml;
+
+            // เลื่อนหน้าจอไปที่ส่วนรายละเอียด
+            studentDetailContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    </script>
+    <!-- End of JS for Firebase/Data Processing -->
+
+    <style>
+        .container-card {
+            box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .data-table th, .data-table td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .data-table th {
+            background-color: #f3f4f6;
+            font-weight: 600;
+            color: #1f2937;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col items-center p-4 sm:p-8">
+
+    <div class="w-full max-w-5xl bg-white rounded-xl container-card p-6 md:p-10">
+        <h1 class="text-3xl font-bold text-primary-blue mb-2 text-center">
+            ระบบสรุปผลการเรียน "มส" และ "ร"
+        </h1>
+        <p class="text-gray-600 mb-6 text-center">
+            ข้อมูลจะถูกโหลดและบันทึกโดยอัตโนมัติ ไม่ต้องอัปโหลดซ้ำ (ดึงจากไฟล์ **0รมส - Sheet1.csv**)
+        </p>
+
+        <!-- ส่วนสำหรับแสดงข้อความสถานะ / Error -->
+        <div id="statusMessage" class="mb-6 text-center text-lg font-medium text-gray-700 min-h-[30px]">
+            กำลังเริ่มต้น...
+        </div>
+
+        <!-- ส่วนสำหรับแสดงผลลัพธ์หลัก -->
+        <div id="resultsContainer" class="hidden">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">
+                ตารางสรุปภาระงาน (ครูผู้สอน)
+            </h2>
+            <div class="overflow-x-auto rounded-lg shadow-md">
+                <table id="teacherSummaryTable" class="min-w-full data-table">
+                    <thead>
+                        <tr>
+                            <th class="sticky top-0">ครูผู้สอน</th>
+                            <th class="sticky top-0">จำนวนวิชาที่ติด</th>
+                            <th class="sticky top-0">จำนวนนักเรียน (คน)</th>
+                            <th class="sticky top-0">รายละเอียด</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- ข้อมูลจะถูกแทรกที่นี่ -->
+                    </tbody>
+                </table>
+            </div>
+            
+            <div id="detailView" class="mt-8 pt-4 border-t" id="studentDetailContainer">
+                <h3 class="text-xl font-semibold text-gray-700 mb-4" id="detailHeader">
+                    รายละเอียดนักเรียนของครูผู้สอน: <span class="text-primary-blue font-bold">--</span>
+                </h3>
+                <div id="studentDetail" class="bg-gray-100 p-4 rounded-lg">
+                    <p class="text-gray-500 italic">กรุณาคลิกปุ่ม 'ดูรายละเอียด' เพื่อแสดงข้อมูลนักเรียน</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
